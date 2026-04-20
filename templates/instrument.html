@@ -1,0 +1,628 @@
+{% extends "base.html" %}
+
+{% block title %}{{ instrument.instrument_id }} Explorer{% endblock %}
+
+{% block content %}
+<section class="mb-8">
+  <div class="glass-panel overflow-hidden rounded-[2rem] shadow-panel">
+    <div class="grid gap-8 px-8 py-10 lg:grid-cols-[2fr,1fr]">
+      <div>
+        <p class="mb-3 text-sm font-semibold uppercase tracking-[0.24em] text-sea">Instrument explorer</p>
+        <h1 class="max-w-3xl text-4xl font-bold tracking-tight text-ink sm:text-5xl">{{ instrument.instrument_id }}</h1>
+        <p class="mt-4 max-w-3xl text-lg text-slate-600">
+          Idősávos trade/depth chartok, snapshot viewer és quality panel.
+        </p>
+        <div class="mt-6 flex flex-wrap gap-3 text-sm text-slate-600">
+          <span class="rounded-full bg-mist px-4 py-2">Típus: {{ instrument.instrument_type }}</span>
+          <span class="rounded-full bg-mist px-4 py-2">trade_tick files: {{ instrument.coverage.trade_tick.file_count|format_int }}</span>
+          <span class="rounded-full bg-mist px-4 py-2">order_book_depths files: {{ instrument.coverage.order_book_depths.file_count|format_int }}</span>
+        </div>
+      </div>
+      <div class="rounded-[1.75rem] bg-ink p-6 text-white">
+        <p class="text-sm uppercase tracking-[0.2em] text-sand">Controls</p>
+        <div class="mt-4 grid gap-3">
+          <label class="block">
+            <span class="mb-2 block text-sm font-medium text-slate-200">Típus filter</span>
+            <select id="instrument-type-filter" class="w-full rounded-2xl border border-white/10 bg-white/10 px-4 py-3 text-sm text-white outline-none">
+              <option value="">összes</option>
+              <option value="currency_pair" {% if instrument.instrument_type == 'currency_pair' %}selected{% endif %}>spot</option>
+              <option value="crypto_perpetual" {% if instrument.instrument_type == 'crypto_perpetual' %}selected{% endif %}>perp</option>
+            </select>
+          </label>
+          <label class="block">
+            <span class="mb-2 block text-sm font-medium text-slate-200">Instrument</span>
+            <input id="instrument-picker" list="instrument-options" value="{{ instrument.instrument_id }}" class="w-full rounded-2xl border border-white/10 bg-white/10 px-4 py-3 text-sm text-white outline-none">
+            <datalist id="instrument-options"></datalist>
+          </label>
+          <div class="grid gap-3 sm:grid-cols-2">
+            <button id="open-instrument" class="rounded-2xl bg-sand px-4 py-3 text-sm font-semibold text-ink transition hover:bg-amber-300">Open explorer</button>
+            <a href="/quality" class="rounded-2xl bg-white/10 px-4 py-3 text-center text-sm font-semibold text-white transition hover:bg-white/20">Quality oldal</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="glass-panel mb-8 rounded-[1.75rem] px-6 py-6 shadow-panel">
+  <div class="grid gap-4 lg:grid-cols-6">
+    <label class="block lg:col-span-2">
+      <span class="mb-2 block text-sm font-medium text-slate-600">From UTC</span>
+      <input id="from-input" type="datetime-local" value="{{ default_from_iso[:16] if default_from_iso else '' }}" class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-ink outline-none">
+    </label>
+    <label class="block lg:col-span-2">
+      <span class="mb-2 block text-sm font-medium text-slate-600">To UTC</span>
+      <input id="to-input" type="datetime-local" value="{{ default_to_iso[:16] if default_to_iso else '' }}" class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-ink outline-none">
+    </label>
+    <label class="block">
+      <span class="mb-2 block text-sm font-medium text-slate-600">Primary data type</span>
+      <select id="data-type-select" class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-ink outline-none">
+        <option value="trade_tick">trade_tick</option>
+        <option value="order_book_depths">order_book_depths</option>
+      </select>
+    </label>
+    <label class="block">
+      <span class="mb-2 block text-sm font-medium text-slate-600">bucket_s</span>
+      <input id="bucket-input" type="number" min="1" step="1" value="60" class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-ink outline-none">
+    </label>
+  </div>
+  <div class="mt-4 flex flex-wrap gap-3">
+    <button id="refresh-all" class="rounded-2xl bg-ink px-5 py-3 text-sm font-semibold text-white transition hover:bg-night">Refresh</button>
+    <a id="export-trades-link" class="rounded-2xl bg-mist px-5 py-3 text-sm font-semibold text-ink transition hover:bg-slate-200" href="#">Export trades CSV</a>
+    <a id="export-l2-link" class="rounded-2xl bg-mist px-5 py-3 text-sm font-semibold text-ink transition hover:bg-slate-200" href="#">Export L2 CSV</a>
+    <a id="export-bundle-link" class="rounded-2xl bg-mist px-5 py-3 text-sm font-semibold text-ink transition hover:bg-slate-200" href="#">Export debug bundle</a>
+  </div>
+</section>
+
+<section class="mb-8 grid gap-6 lg:grid-cols-2">
+  <article class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
+    <div class="flex items-center justify-between gap-4">
+      <div>
+        <p class="text-sm uppercase tracking-[0.22em] text-sea">Coverage</p>
+        <h2 class="mt-2 text-3xl font-bold text-ink">trade_tick</h2>
+      </div>
+      <span id="trade-coverage-badge" class="rounded-full bg-mist px-3 py-1 text-xs font-semibold text-ink">loading</span>
+    </div>
+    <div id="trade-coverage" class="mt-5 grid gap-3 sm:grid-cols-2"></div>
+  </article>
+  <article class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
+    <div class="flex items-center justify-between gap-4">
+      <div>
+        <p class="text-sm uppercase tracking-[0.22em] text-sea">Coverage</p>
+        <h2 class="mt-2 text-3xl font-bold text-ink">order_book_depths</h2>
+      </div>
+      <span id="depth-coverage-badge" class="rounded-full bg-mist px-3 py-1 text-xs font-semibold text-ink">loading</span>
+    </div>
+    <div id="depth-coverage" class="mt-5 grid gap-3 sm:grid-cols-2"></div>
+  </article>
+</section>
+
+<section id="trade-section" class="mb-8 space-y-6">
+  <div class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
+    <div class="flex items-center justify-between gap-4">
+      <div>
+        <p class="text-sm uppercase tracking-[0.22em] text-sea">TradeTick</p>
+        <h2 class="mt-2 text-3xl font-bold text-ink">Trade price és volume</h2>
+      </div>
+      <span id="trade-status" class="text-sm text-slate-500">loading...</span>
+    </div>
+    <div id="trade-price-chart" class="mt-6 h-[360px] w-full"></div>
+    <div id="trade-volume-chart" class="mt-6 h-[320px] w-full"></div>
+  </div>
+</section>
+
+<section id="depth-section" class="mb-8 space-y-6">
+  <div class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
+    <div class="flex items-center justify-between gap-4">
+      <div>
+        <p class="text-sm uppercase tracking-[0.22em] text-sea">OrderBookDepth10</p>
+        <h2 class="mt-2 text-3xl font-bold text-ink">Best bid/ask, spread, mid</h2>
+      </div>
+      <span id="depth-status" class="text-sm text-slate-500">loading...</span>
+    </div>
+    <div id="depth-price-chart" class="mt-6 h-[360px] w-full"></div>
+    <div id="depth-update-chart" class="mt-6 h-[320px] w-full"></div>
+  </div>
+</section>
+
+<section class="mb-8 grid gap-6 xl:grid-cols-[1.3fr,0.7fr]">
+  <article class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
+    <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+      <div>
+        <p class="text-sm uppercase tracking-[0.22em] text-sea">Snapshot viewer</p>
+        <h2 class="mt-2 text-3xl font-bold text-ink">Nearest snapshot + ladder</h2>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <button class="snapshot-step rounded-full bg-mist px-3 py-2 text-xs font-semibold text-ink" data-step="-100">-100</button>
+        <button class="snapshot-step rounded-full bg-mist px-3 py-2 text-xs font-semibold text-ink" data-step="-10">-10</button>
+        <button class="snapshot-step rounded-full bg-mist px-3 py-2 text-xs font-semibold text-ink" data-step="-1">-1</button>
+        <button class="snapshot-step rounded-full bg-mist px-3 py-2 text-xs font-semibold text-ink" data-step="1">+1</button>
+        <button class="snapshot-step rounded-full bg-mist px-3 py-2 text-xs font-semibold text-ink" data-step="10">+10</button>
+        <button class="snapshot-step rounded-full bg-mist px-3 py-2 text-xs font-semibold text-ink" data-step="100">+100</button>
+      </div>
+    </div>
+    <div class="mt-5 grid gap-4 lg:grid-cols-3">
+      <label class="block lg:col-span-2">
+        <span class="mb-2 block text-sm font-medium text-slate-600">Nearest snapshot to UTC time</span>
+        <input id="snapshot-time-input" type="datetime-local" class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-ink outline-none">
+      </label>
+      <label class="block">
+        <span class="mb-2 block text-sm font-medium text-slate-600">Index</span>
+        <input id="snapshot-index-input" type="number" min="0" step="1" class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-ink outline-none">
+      </label>
+    </div>
+    <div class="mt-4 flex flex-wrap gap-3">
+      <button id="find-nearest-snapshot" class="rounded-2xl bg-ink px-4 py-3 text-sm font-semibold text-white transition hover:bg-night">Nearest snapshot</button>
+      <button id="load-index-snapshot" class="rounded-2xl bg-mist px-4 py-3 text-sm font-semibold text-ink transition hover:bg-slate-200">Load index</button>
+    </div>
+    <div id="snapshot-summary" class="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4"></div>
+    <div id="depth-ladder-chart" class="mt-6 h-[360px] w-full"></div>
+    <div class="mt-6 grid gap-6 xl:grid-cols-2">
+      <div class="overflow-x-auto">
+        <table class="min-w-full text-sm">
+          <thead>
+            <tr class="text-left text-xs uppercase tracking-[0.18em] text-slate-500">
+              <th class="px-3 py-2">Bid lvl</th>
+              <th class="px-3 py-2">Price</th>
+              <th class="px-3 py-2">Qty</th>
+            </tr>
+          </thead>
+          <tbody id="bid-ladder-body"></tbody>
+        </table>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="min-w-full text-sm">
+          <thead>
+            <tr class="text-left text-xs uppercase tracking-[0.18em] text-slate-500">
+              <th class="px-3 py-2">Ask lvl</th>
+              <th class="px-3 py-2">Price</th>
+              <th class="px-3 py-2">Qty</th>
+            </tr>
+          </thead>
+          <tbody id="ask-ladder-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </article>
+  <article class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
+    <div>
+      <p class="text-sm uppercase tracking-[0.22em] text-sea">Quality panel</p>
+      <h2 class="mt-2 text-3xl font-bold text-ink">Crossed, monotonic, gaps</h2>
+    </div>
+    <div id="quality-cards" class="mt-6 grid gap-3 sm:grid-cols-2"></div>
+    <div class="mt-6">
+      <h3 class="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Top outlier gaps</h3>
+      <div id="quality-gaps" class="mt-3 space-y-2"></div>
+    </div>
+    <div class="mt-6">
+      <div class="flex items-center justify-between gap-4">
+        <h3 class="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Hibás snapshotok</h3>
+        <span id="quality-status" class="text-xs text-slate-500">loading...</span>
+      </div>
+      <div id="quality-issues" class="mt-3 space-y-2"></div>
+    </div>
+  </article>
+</section>
+
+<script id="inventory-data" type="application/json">{{ inventory_payload | safe }}</script>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const inventory = JSON.parse(document.getElementById('inventory-data').textContent || '[]');
+  const initialInstrumentId = '{{ instrument.instrument_id }}';
+  const fromInput = document.getElementById('from-input');
+  const toInput = document.getElementById('to-input');
+  const instrumentTypeFilter = document.getElementById('instrument-type-filter');
+  const instrumentPicker = document.getElementById('instrument-picker');
+  const instrumentOptions = document.getElementById('instrument-options');
+  const openInstrumentButton = document.getElementById('open-instrument');
+  const refreshAllButton = document.getElementById('refresh-all');
+  const dataTypeSelect = document.getElementById('data-type-select');
+  const bucketInput = document.getElementById('bucket-input');
+  const snapshotIndexInput = document.getElementById('snapshot-index-input');
+  const snapshotTimeInput = document.getElementById('snapshot-time-input');
+  const findNearestSnapshotButton = document.getElementById('find-nearest-snapshot');
+  const loadIndexSnapshotButton = document.getElementById('load-index-snapshot');
+  const exportTradesLink = document.getElementById('export-trades-link');
+  const exportL2Link = document.getElementById('export-l2-link');
+  const exportBundleLink = document.getElementById('export-bundle-link');
+  let currentSnapshotIndex = null;
+
+  function currentInstrumentId() {
+    return instrumentPicker.value.trim() || initialInstrumentId;
+  }
+
+  function normalizeDatetimeLocal(value) {
+    if (!value) return null;
+    return `${value}:00Z`;
+  }
+
+  function buildQuery(params) {
+    const urlParams = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== null && value !== undefined && value !== '') {
+        urlParams.set(key, String(value));
+      }
+    });
+    return urlParams.toString();
+  }
+
+  function currentRangeParams() {
+    return {
+      instrument_id: currentInstrumentId(),
+      from: normalizeDatetimeLocal(fromInput.value),
+      to: normalizeDatetimeLocal(toInput.value),
+    };
+  }
+
+  function renderInstrumentOptions() {
+    const typeFilter = instrumentTypeFilter.value;
+    const options = inventory.filter((item) => !typeFilter || item.instrument_type === typeFilter);
+    instrumentOptions.innerHTML = options.map((item) => `<option value="${item.instrument_id}"></option>`).join('');
+  }
+
+  function openInstrument() {
+    const instrumentId = currentInstrumentId();
+    if (!instrumentId) return;
+    window.location.href = `/instrument/${encodeURIComponent(instrumentId)}`;
+  }
+
+  function updateExportLinks() {
+    const params = currentRangeParams();
+    exportTradesLink.href = `/api/export?${buildQuery({ ...params, kind: 'trades' })}`;
+    exportL2Link.href = `/api/export?${buildQuery({ ...params, kind: 'l2' })}`;
+    exportBundleLink.href = `/api/export?${buildQuery({ ...params, kind: 'bundle' })}`;
+  }
+
+  function renderCoverage(targetId, badgeId, summary) {
+    const target = document.getElementById(targetId);
+    const badge = document.getElementById(badgeId);
+    if (!target || !badge) return;
+    if (!summary || !summary.present) {
+      badge.textContent = 'nincs adat';
+      target.innerHTML = '<div class="rounded-2xl bg-mist px-4 py-3 text-sm text-slate-600">Nincs adat ebben az idősávban.</div>';
+      return;
+    }
+
+    badge.textContent = `${summary.row_count} rows`;
+    target.innerHTML = `
+      <div class="rounded-2xl bg-mist px-4 py-3">
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">ts_event range</div>
+        <div class="mt-2 text-sm text-ink">${summary.ts_event_min_iso || '—'}<br>${summary.ts_event_max_iso || '—'}</div>
+      </div>
+      <div class="rounded-2xl bg-mist px-4 py-3">
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">max gap</div>
+        <div class="mt-2 text-sm font-semibold text-ink">${summary.max_gap_seconds ? `${summary.max_gap_seconds.toFixed(3)} s` : '—'}</div>
+      </div>
+      <div class="rounded-2xl bg-mist px-4 py-3">
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">missing ratio est.</div>
+        <div class="mt-2 text-sm font-semibold text-ink">${(summary.missing_ratio_estimate * 100).toFixed(2)}%</div>
+      </div>
+      <div class="rounded-2xl bg-mist px-4 py-3">
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">session breaks</div>
+        <div class="mt-2 text-sm font-semibold text-ink">${summary.session_break_count}</div>
+      </div>
+    `;
+  }
+
+  function renderTradeCharts(raw, agg) {
+    const priceChart = document.getElementById('trade-price-chart');
+    const volumeChart = document.getElementById('trade-volume-chart');
+    const status = document.getElementById('trade-status');
+    status.textContent = `${raw.returned_points}/${raw.total_rows} raw points`;
+
+    if (!raw.points.length) {
+      priceChart.innerHTML = '<div class="flex h-full items-center justify-center rounded-3xl bg-mist text-sm text-slate-500">Nincs trade adat.</div>';
+      volumeChart.innerHTML = '';
+      return;
+    }
+
+    Plotly.newPlot(priceChart, [
+      {
+        type: 'scattergl',
+        mode: 'lines',
+        x: raw.points.map((point) => point.ts_event_iso),
+        y: raw.points.map((point) => point.price),
+        line: { color: '#0F766E', width: 1.8 },
+        name: 'trade price',
+      },
+    ], {
+      margin: { t: 20, r: 20, b: 50, l: 60 },
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      xaxis: { title: 'UTC time' },
+      yaxis: { title: 'Price' },
+      font: { color: '#10212B' },
+    }, { responsive: true });
+
+    Plotly.newPlot(volumeChart, [
+      {
+        type: 'bar',
+        x: agg.points.map((point) => point.ts_event_iso),
+        y: agg.points.map((point) => point.volume || 0),
+        marker: { color: '#F4B860' },
+        name: 'volume',
+      },
+      {
+        type: 'scatter',
+        mode: 'lines',
+        x: agg.points.map((point) => point.ts_event_iso),
+        y: agg.points.map((point) => point.trade_count || 0),
+        yaxis: 'y2',
+        line: { color: '#E76F51', width: 2 },
+        name: 'trade count',
+      },
+    ], {
+      margin: { t: 20, r: 50, b: 50, l: 60 },
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      xaxis: { title: 'UTC time' },
+      yaxis: { title: 'Volume' },
+      yaxis2: { title: 'Count', overlaying: 'y', side: 'right' },
+      barmode: 'overlay',
+      font: { color: '#10212B' },
+    }, { responsive: true });
+  }
+
+  function renderDepthCharts(raw, agg) {
+    const priceChart = document.getElementById('depth-price-chart');
+    const updateChart = document.getElementById('depth-update-chart');
+    const status = document.getElementById('depth-status');
+    status.textContent = `${raw.returned_points}/${raw.total_rows} raw points`;
+
+    if (!raw.points.length) {
+      priceChart.innerHTML = '<div class="flex h-full items-center justify-center rounded-3xl bg-mist text-sm text-slate-500">Nincs depth adat.</div>';
+      updateChart.innerHTML = '';
+      return;
+    }
+
+    Plotly.newPlot(priceChart, [
+      {
+        type: 'scattergl',
+        mode: 'lines',
+        x: raw.points.map((point) => point.ts_event_iso),
+        y: raw.points.map((point) => point.best_bid),
+        line: { color: '#0F766E', width: 1.8 },
+        name: 'best_bid',
+        customdata: raw.points.map((point) => point.ts_event_ns),
+      },
+      {
+        type: 'scattergl',
+        mode: 'lines',
+        x: raw.points.map((point) => point.ts_event_iso),
+        y: raw.points.map((point) => point.best_ask),
+        line: { color: '#E76F51', width: 1.8 },
+        name: 'best_ask',
+        customdata: raw.points.map((point) => point.ts_event_ns),
+      },
+      {
+        type: 'scattergl',
+        mode: 'lines',
+        x: raw.points.map((point) => point.ts_event_iso),
+        y: raw.points.map((point) => point.mid),
+        line: { color: '#10212B', width: 1.2, dash: 'dot' },
+        name: 'mid',
+        customdata: raw.points.map((point) => point.ts_event_ns),
+      },
+    ], {
+      margin: { t: 20, r: 20, b: 50, l: 60 },
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      xaxis: { title: 'UTC time' },
+      yaxis: { title: 'Price' },
+      font: { color: '#10212B' },
+    }, { responsive: true });
+
+    priceChart.on('plotly_click', (event) => {
+      const ts = event.points?.[0]?.customdata;
+      if (ts) loadSnapshot({ ts });
+    });
+
+    Plotly.newPlot(updateChart, [
+      {
+        type: 'bar',
+        x: agg.points.map((point) => point.ts_event_iso),
+        y: agg.points.map((point) => point.update_rate_per_minute || 0),
+        marker: { color: '#0F766E' },
+        name: 'updates/min',
+      },
+      {
+        type: 'scatter',
+        mode: 'lines',
+        x: agg.points.map((point) => point.ts_event_iso),
+        y: agg.points.map((point) => point.spread || 0),
+        yaxis: 'y2',
+        line: { color: '#E76F51', width: 2 },
+        name: 'spread',
+      },
+    ], {
+      margin: { t: 20, r: 50, b: 50, l: 60 },
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      xaxis: { title: 'UTC time' },
+      yaxis: { title: 'Updates/min' },
+      yaxis2: { title: 'Spread', overlaying: 'y', side: 'right' },
+      font: { color: '#10212B' },
+    }, { responsive: true });
+  }
+
+  function renderSnapshot(snapshotResponse) {
+    const summary = document.getElementById('snapshot-summary');
+    const bidBody = document.getElementById('bid-ladder-body');
+    const askBody = document.getElementById('ask-ladder-body');
+    const chart = document.getElementById('depth-ladder-chart');
+    if (!snapshotResponse.snapshot) {
+      summary.innerHTML = '<div class="rounded-2xl bg-mist px-4 py-3 text-sm text-slate-600">Nincs találat.</div>';
+      bidBody.innerHTML = '';
+      askBody.innerHTML = '';
+      chart.innerHTML = '';
+      return;
+    }
+
+    currentSnapshotIndex = snapshotResponse.resolved_index;
+    snapshotIndexInput.value = currentSnapshotIndex ?? '';
+    snapshotTimeInput.value = snapshotResponse.snapshot.ts_event_iso.slice(0, 16);
+    const snapshot = snapshotResponse.snapshot;
+    summary.innerHTML = `
+      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">index</div><div class="mt-2 text-sm font-semibold text-ink">${snapshot.index}</div></div>
+      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">ts_event</div><div class="mt-2 text-sm font-semibold text-ink">${snapshot.ts_event_iso}</div></div>
+      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">spread</div><div class="mt-2 text-sm font-semibold text-ink">${snapshot.spread ?? '—'}</div></div>
+      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">issues</div><div class="mt-2 text-sm font-semibold text-ink">${snapshot.issues.join(', ') || 'none'}</div></div>
+    `;
+
+    bidBody.innerHTML = snapshot.bids.map((level) => `
+      <tr class="border-t border-slate-100">
+        <td class="px-3 py-2">${level.level}</td>
+        <td class="px-3 py-2">${level.price}</td>
+        <td class="px-3 py-2">${level.size}</td>
+      </tr>
+    `).join('');
+    askBody.innerHTML = snapshot.asks.map((level) => `
+      <tr class="border-t border-slate-100">
+        <td class="px-3 py-2">${level.level}</td>
+        <td class="px-3 py-2">${level.price}</td>
+        <td class="px-3 py-2">${level.size}</td>
+      </tr>
+    `).join('');
+
+    Plotly.newPlot(chart, [
+      {
+        type: 'bar',
+        orientation: 'h',
+        y: snapshot.bids.map((level) => level.price).reverse(),
+        x: snapshot.bids.map((level) => level.size).reverse(),
+        marker: { color: '#0F766E' },
+        name: 'bids',
+      },
+      {
+        type: 'bar',
+        orientation: 'h',
+        y: snapshot.asks.map((level) => level.price),
+        x: snapshot.asks.map((level) => level.size),
+        marker: { color: '#E76F51' },
+        name: 'asks',
+      },
+    ], {
+      barmode: 'overlay',
+      margin: { t: 20, r: 20, b: 50, l: 80 },
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      xaxis: { title: 'Qty' },
+      yaxis: { title: 'Price' },
+      font: { color: '#10212B' },
+    }, { responsive: true });
+  }
+
+  function renderQuality(quality) {
+    const cards = document.getElementById('quality-cards');
+    const gaps = document.getElementById('quality-gaps');
+    const issues = document.getElementById('quality-issues');
+    const status = document.getElementById('quality-status');
+    status.textContent = `${quality.bad_snapshot_count}/${quality.snapshot_count} bad snapshots`;
+
+    cards.innerHTML = `
+      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">quality score</div><div class="mt-2 text-sm font-semibold text-ink">${quality.quality_score}</div></div>
+      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">crossed rate</div><div class="mt-2 text-sm font-semibold text-ink">${(quality.crossed_rate * 100).toFixed(2)}%</div></div>
+      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">empty rate</div><div class="mt-2 text-sm font-semibold text-ink">${(quality.empty_side_rate * 100).toFixed(2)}%</div></div>
+      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">session breaks</div><div class="mt-2 text-sm font-semibold text-ink">${quality.session_break_count}</div></div>
+      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">monotonic violations</div><div class="mt-2 text-sm font-semibold text-ink">${quality.monotonic_violation_count}</div></div>
+      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">negative / zero qty</div><div class="mt-2 text-sm font-semibold text-ink">${quality.negative_qty_count} / ${quality.zero_qty_count}</div></div>
+    `;
+
+    gaps.innerHTML = quality.top_gaps.map((gap) => `
+      <div class="rounded-2xl bg-white px-4 py-3 shadow-sm">
+        <div class="text-sm font-semibold text-ink">${gap.gap_seconds.toFixed(3)} s ${gap.is_session_break ? '<span class="text-coral">(session break)</span>' : ''}</div>
+        <div class="mt-1 text-xs text-slate-500">${gap.previous_ts_event_iso} -> ${gap.next_ts_event_iso}</div>
+      </div>
+    `).join('') || '<div class="rounded-2xl bg-mist px-4 py-3 text-sm text-slate-600">Nincs outlier gap.</div>';
+
+    issues.innerHTML = quality.bad_snapshots.map((issue) => `
+      <button data-index="${issue.index}" class="quality-issue block w-full rounded-2xl bg-white px-4 py-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
+        <div class="flex items-center justify-between gap-3">
+          <span class="text-sm font-semibold text-ink">${issue.ts_event_iso}</span>
+          <span class="text-xs text-slate-500">#${issue.index}</span>
+        </div>
+        <div class="mt-2 text-xs text-rose-600">${issue.issues.join(', ')}</div>
+      </button>
+    `).join('') || '<div class="rounded-2xl bg-mist px-4 py-3 text-sm text-slate-600">Nincs hibás snapshot a kiválasztott idősávban.</div>';
+
+    document.querySelectorAll('.quality-issue').forEach((button) => {
+      button.addEventListener('click', () => loadSnapshot({ index: button.dataset.index }));
+    });
+  }
+
+  async function fetchJson(path, params) {
+    const query = buildQuery(params);
+    const response = await fetch(`${path}?${query}`);
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text);
+    }
+    return response.json();
+  }
+
+  async function loadCoverage() {
+    const params = currentRangeParams();
+    const coverage = await fetchJson('/api/coverage', params);
+    renderCoverage('trade-coverage', 'trade-coverage-badge', coverage.coverage.trade_tick);
+    renderCoverage('depth-coverage', 'depth-coverage-badge', coverage.coverage.order_book_depths);
+  }
+
+  async function loadTrades() {
+    const params = currentRangeParams();
+    const bucket_s = Number(bucketInput.value || 60);
+    const [raw, agg] = await Promise.all([
+      fetchJson('/api/trades', { ...params, mode: 'raw', max_points: 5000 }),
+      fetchJson('/api/trades', { ...params, mode: 'agg', bucket_s, max_points: 2000 }),
+    ]);
+    renderTradeCharts(raw, agg);
+  }
+
+  async function loadL2Timeseries() {
+    const params = currentRangeParams();
+    const bucket_s = Number(bucketInput.value || 60);
+    const [raw, agg] = await Promise.all([
+      fetchJson('/api/l2/timeseries', { ...params, mode: 'raw', max_points: 5000 }),
+      fetchJson('/api/l2/timeseries', { ...params, mode: 'agg', bucket_s, max_points: 2000 }),
+    ]);
+    renderDepthCharts(raw, agg);
+  }
+
+  async function loadQuality() {
+    const params = currentRangeParams();
+    const quality = await fetchJson('/api/l2/quality', params);
+    renderQuality(quality);
+  }
+
+  async function loadSnapshot(extra) {
+    const params = { instrument_id: currentInstrumentId(), ...extra };
+    const response = await fetchJson('/api/l2/snapshot', params);
+    renderSnapshot(response);
+  }
+
+  async function refreshAll() {
+    updateExportLinks();
+    await Promise.all([loadCoverage(), loadTrades(), loadL2Timeseries(), loadQuality()]);
+    await loadSnapshot({ ts: normalizeDatetimeLocal(toInput.value || fromInput.value) || undefined });
+    document.getElementById(dataTypeSelect.value === 'trade_tick' ? 'trade-section' : 'depth-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  instrumentTypeFilter?.addEventListener('change', renderInstrumentOptions);
+  openInstrumentButton?.addEventListener('click', openInstrument);
+  instrumentPicker?.addEventListener('change', updateExportLinks);
+  refreshAllButton?.addEventListener('click', refreshAll);
+  findNearestSnapshotButton?.addEventListener('click', () => loadSnapshot({ ts: normalizeDatetimeLocal(snapshotTimeInput.value) }));
+  loadIndexSnapshotButton?.addEventListener('click', () => loadSnapshot({ index: snapshotIndexInput.value }));
+  document.querySelectorAll('.snapshot-step').forEach((button) => {
+    button.addEventListener('click', () => {
+      if (currentSnapshotIndex === null) return;
+      loadSnapshot({ index: currentSnapshotIndex + Number(button.dataset.step) });
+    });
+  });
+
+  renderInstrumentOptions();
+  updateExportLinks();
+  refreshAll();
+</script>
+{% endblock %}

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Nautilus Catalog Viewer{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ink: '#10212B',
+            mist: '#EEF4F7',
+            sea: '#0F766E',
+            sand: '#F4B860',
+            coral: '#E76F51',
+            night: '#0B1A22',
+          },
+          boxShadow: {
+            panel: '0 20px 50px rgba(16, 33, 43, 0.12)',
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    body {
+      background:
+        radial-gradient(circle at top left, rgba(244, 184, 96, 0.28), transparent 25%),
+        radial-gradient(circle at top right, rgba(15, 118, 110, 0.20), transparent 20%),
+        linear-gradient(180deg, #f7fbfc 0%, #edf3f6 100%);
+      color: #10212B;
+      font-family: "Segoe UI", "Helvetica Neue", sans-serif;
+    }
+
+    .glass-panel {
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(8px);
+    }
+  </style>
+</head>
+<body class="min-h-screen">
+  <header class="sticky top-0 z-30 border-b border-white/70 bg-white/70 backdrop-blur-md">
+    <div class="mx-auto flex max-w-7xl items-center justify-between px-4 py-4 sm:px-6 lg:px-8">
+      <a href="/" class="flex items-center gap-3">
+        <div class="flex h-11 w-11 items-center justify-center rounded-2xl bg-ink text-lg font-bold text-white">NC</div>
+        <div>
+          <div class="text-xs font-semibold uppercase tracking-[0.22em] text-sea">Nautilus Catalog Viewer</div>
+          <div class="text-sm text-slate-500">Inventory, explorer, quality</div>
+        </div>
+      </a>
+      <nav class="flex items-center gap-2 text-sm">
+        <a href="/" class="rounded-full px-4 py-2 font-medium text-slate-700 transition hover:bg-mist hover:text-ink">Home</a>
+        <a href="/quality" class="rounded-full px-4 py-2 font-medium text-slate-700 transition hover:bg-mist hover:text-ink">Quality</a>
+      </nav>
+    </div>
+  </header>
+  <main class="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+    {% block content %}{% endblock %}
+  </main>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

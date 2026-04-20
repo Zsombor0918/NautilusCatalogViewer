@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+
+{% block title %}Quality Dashboard{% endblock %}
+
+{% block content %}
+<section class="mb-8">
+  <div class="glass-panel overflow-hidden rounded-[2rem] shadow-panel">
+    <div class="grid gap-8 px-8 py-10 lg:grid-cols-[2fr,1fr]">
+      <div>
+        <p class="mb-3 text-sm font-semibold uppercase tracking-[0.24em] text-sea">Quality dashboard</p>
+        <h1 class="max-w-3xl text-4xl font-bold tracking-tight text-ink sm:text-5xl">
+          Top offenders, worst gaps, crossed rate
+        </h1>
+        <p class="mt-4 max-w-3xl text-lg text-slate-600">
+          A cache-elt audit quality összefoglalója, gyors linkekkel az instrument explorerre.
+        </p>
+      </div>
+      <div class="rounded-[1.75rem] bg-ink p-6 text-white">
+        <p class="text-sm uppercase tracking-[0.2em] text-sand">Audit cache</p>
+        {% if audit %}
+        <h2 class="mt-2 text-3xl font-semibold">{{ audit.generated_at }}</h2>
+        <p class="mt-3 text-sm text-slate-200">Overall quality score: {{ audit.summary.overall_quality_score|format_float }}</p>
+        <p class="mt-2 text-sm text-slate-200">Session breaks: {{ audit.summary.session_break_count|format_int }}</p>
+        {% else %}
+        <h2 class="mt-2 text-3xl font-semibold">Nincs audit</h2>
+        <p class="mt-3 text-sm text-slate-200">Előbb futtasd a Run checks auditot a home oldalon.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</section>
+
+{% if audit %}
+<section class="mb-8 grid gap-6 lg:grid-cols-4">
+  <article class="glass-panel rounded-[1.5rem] px-6 py-5 shadow-panel">
+    <p class="text-sm uppercase tracking-[0.2em] text-sea">Overall quality</p>
+    <h3 class="mt-2 text-3xl font-bold text-ink">{{ audit.summary.overall_quality_score|format_float }}</h3>
+    <p class="mt-2 text-sm text-slate-600">Súlyozott quality score</p>
+  </article>
+  <article class="glass-panel rounded-[1.5rem] px-6 py-5 shadow-panel">
+    <p class="text-sm uppercase tracking-[0.2em] text-sea">Crossed rate</p>
+    <h3 class="mt-2 text-3xl font-bold text-ink">{{ audit.summary.overall_crossed_rate|format_pct }}</h3>
+    <p class="mt-2 text-sm text-slate-600">Global crossed book arány</p>
+  </article>
+  <article class="glass-panel rounded-[1.5rem] px-6 py-5 shadow-panel">
+    <p class="text-sm uppercase tracking-[0.2em] text-sea">Empty rate</p>
+    <h3 class="mt-2 text-3xl font-bold text-ink">{{ audit.summary.overall_empty_rate|format_pct }}</h3>
+    <p class="mt-2 text-sm text-slate-600">Global empty side arány</p>
+  </article>
+  <article class="glass-panel rounded-[1.5rem] px-6 py-5 shadow-panel">
+    <p class="text-sm uppercase tracking-[0.2em] text-sea">Monotonic rate</p>
+    <h3 class="mt-2 text-3xl font-bold text-ink">{{ audit.summary.overall_monotonic_rate|format_pct }}</h3>
+    <p class="mt-2 text-sm text-slate-600">Rendezési sértések aránya</p>
+  </article>
+</section>
+
+<section class="mb-8 grid gap-6 lg:grid-cols-3">
+  <article class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
+    <h2 class="text-2xl font-bold text-ink">Worst max gap</h2>
+    <div class="mt-5 space-y-3">
+      {% for item in audit.summary.top_gap_offenders %}
+      <a href="/instrument/{{ item.instrument_id }}" class="flex items-center justify-between rounded-2xl bg-white px-4 py-3 text-sm shadow-sm">
+        <div>
+          <div class="font-semibold text-ink">{{ item.instrument_id }}</div>
+          <div class="text-xs text-slate-500">{{ item.instrument_type }}</div>
+        </div>
+        <div class="text-right text-sm text-slate-500">{{ item.max_gap_seconds|format_seconds }}</div>
+      </a>
+      {% endfor %}
+    </div>
+  </article>
+  <article class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
+    <h2 class="text-2xl font-bold text-ink">Worst crossed rate</h2>
+    <div class="mt-5 space-y-3">
+      {% for item in audit.summary.top_crossed_offenders %}
+      <a href="/instrument/{{ item.instrument_id }}" class="flex items-center justify-between rounded-2xl bg-white px-4 py-3 text-sm shadow-sm">
+        <div>
+          <div class="font-semibold text-ink">{{ item.instrument_id }}</div>
+          <div class="text-xs text-slate-500">{{ item.instrument_type }}</div>
+        </div>
+        <div class="text-right text-sm text-slate-500">{{ item.crossed_rate|format_pct }}</div>
+      </a>
+      {% endfor %}
+    </div>
+  </article>
+  <article class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
+    <h2 class="text-2xl font-bold text-ink">Worst empty rate</h2>
+    <div class="mt-5 space-y-3">
+      {% for item in audit.summary.top_empty_offenders %}
+      <a href="/instrument/{{ item.instrument_id }}" class="flex items-center justify-between rounded-2xl bg-white px-4 py-3 text-sm shadow-sm">
+        <div>
+          <div class="font-semibold text-ink">{{ item.instrument_id }}</div>
+          <div class="text-xs text-slate-500">{{ item.instrument_type }}</div>
+        </div>
+        <div class="text-right text-sm text-slate-500">{{ item.empty_rate|format_pct }}</div>
+      </a>
+      {% endfor %}
+    </div>
+  </article>
+</section>
+
+<section class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
+  <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+    <div>
+      <p class="text-sm uppercase tracking-[0.22em] text-sea">Per instrument quality</p>
+      <h2 class="mt-2 text-3xl font-bold text-ink">Auditált instrumentek</h2>
+    </div>
+    <div class="text-sm text-slate-500">Alacsonyabb quality score = rosszabb instrument.</div>
+  </div>
+  <div class="mt-6 overflow-x-auto">
+    <table class="min-w-[1200px] border-separate border-spacing-y-2 text-sm">
+      <thead>
+        <tr class="text-left text-xs uppercase tracking-[0.18em] text-slate-500">
+          <th class="px-4 py-2">Instrument</th>
+          <th class="px-4 py-2">Típus</th>
+          <th class="px-4 py-2">Quality score</th>
+          <th class="px-4 py-2">Crossed rate</th>
+          <th class="px-4 py-2">Empty rate</th>
+          <th class="px-4 py-2">Session breaks</th>
+          <th class="px-4 py-2">Max gap</th>
+          <th class="px-4 py-2">Bad snapshots</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in sorted_instruments %}
+        <tr class="rounded-2xl bg-white shadow-sm">
+          <td class="rounded-l-2xl px-4 py-4">
+            <a href="/instrument/{{ item.instrument_id }}" class="font-semibold text-ink hover:text-sea">{{ item.instrument_id }}</a>
+          </td>
+          <td class="px-4 py-4 text-slate-600">{{ item.instrument_type }}</td>
+          <td class="px-4 py-4 text-slate-700">{{ item.quality_score|format_float }}</td>
+          <td class="px-4 py-4 text-slate-700">{{ item.crossed_rate|format_pct }}</td>
+          <td class="px-4 py-4 text-slate-700">{{ item.empty_rate|format_pct }}</td>
+          <td class="px-4 py-4 text-slate-700">{{ item.session_break_count|format_int }}</td>
+          <td class="px-4 py-4 text-slate-700">{{ item.max_gap_seconds|format_seconds }}</td>
+          <td class="rounded-r-2xl px-4 py-4 text-slate-700">{{ item.quality_bad_snapshot_count|format_int }} / {{ item.quality_snapshot_count|format_int }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% else %}
+<section class="glass-panel rounded-[1.75rem] px-6 py-8 shadow-panel">
+  <p class="text-sm uppercase tracking-[0.22em] text-sea">Quality</p>
+  <h2 class="mt-2 text-3xl font-bold text-ink">Még nincs cache-elt audit</h2>
+  <p class="mt-3 max-w-2xl text-sm text-slate-600">
+    Nyisd meg a home oldalt, futtasd a Run checks auditot, és utána ez az oldal megjeleníti a top offender listákat.
+  </p>
+</section>
+{% endif %}
+{% endblock %}
