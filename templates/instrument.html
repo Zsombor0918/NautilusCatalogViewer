@@ -3,6 +3,13 @@
 {% block title %}{{ instrument.instrument_id }} Explorer{% endblock %}
 
 {% block content %}
+{# ── Determine depth10 availability for conditional sections ── #}
+{% set has_depth10 = instrument.coverage.get('order_book_depths') and instrument.coverage['order_book_depths'].present %}
+{% set has_deltas = instrument.coverage.get('order_book_deltas') and instrument.coverage['order_book_deltas'].present %}
+
+<!-- ════════════════════════════════════════════════════════════════════
+     HEADER
+     ════════════════════════════════════════════════════════════════════ -->
 <section class="mb-8">
   <div class="glass-panel overflow-hidden rounded-[2rem] shadow-panel">
     <div class="grid gap-8 px-8 py-10 lg:grid-cols-[2fr,1fr]">
@@ -10,21 +17,22 @@
         <p class="mb-3 text-sm font-semibold uppercase tracking-[0.24em] text-sea">Instrument explorer</p>
         <h1 class="max-w-3xl text-4xl font-bold tracking-tight text-ink sm:text-5xl">{{ instrument.instrument_id }}</h1>
         <p class="mt-4 max-w-3xl text-lg text-slate-600">
-          Idősávos trade/depth chartok, snapshot viewer és quality panel.
+          Delta-first catalog inspection &mdash; trades, deltas, optional depth10, readiness and report context.
         </p>
         <div class="mt-6 flex flex-wrap gap-3 text-sm text-slate-600">
-          <span class="rounded-full bg-mist px-4 py-2">Típus: {{ instrument.instrument_type }}</span>
-          <span class="rounded-full bg-mist px-4 py-2">trade_tick files: {{ instrument.coverage.trade_tick.file_count|format_int }}</span>
-          <span class="rounded-full bg-mist px-4 py-2">order_book_depths files: {{ instrument.coverage.order_book_depths.file_count|format_int }}</span>
+          <span class="rounded-full bg-mist px-4 py-2">Type: {{ instrument.instrument_type }}</span>
+          <span class="rounded-full bg-mist px-4 py-2">trade_tick files: {{ instrument.coverage.trade_tick.file_count|format_int if instrument.coverage.trade_tick else '0' }}</span>
+          <span class="rounded-full bg-mist px-4 py-2">order_book_deltas files: {{ instrument.coverage.order_book_deltas.file_count|format_int if instrument.coverage.get('order_book_deltas') else '0' }}</span>
+          <span class="rounded-full bg-mist px-4 py-2">order_book_depths files: {{ instrument.coverage.order_book_depths.file_count|format_int if instrument.coverage.get('order_book_depths') else '0' }} <span class="text-slate-400">(optional)</span></span>
         </div>
       </div>
       <div class="rounded-[1.75rem] bg-ink p-6 text-white">
         <p class="text-sm uppercase tracking-[0.2em] text-sand">Controls</p>
         <div class="mt-4 grid gap-3">
           <label class="block">
-            <span class="mb-2 block text-sm font-medium text-slate-200">Típus filter</span>
+            <span class="mb-2 block text-sm font-medium text-slate-200">Type filter</span>
             <select id="instrument-type-filter" class="w-full rounded-2xl border border-white/10 bg-white/10 px-4 py-3 text-sm text-white outline-none">
-              <option value="">összes</option>
+              <option value="">all</option>
               <option value="currency_pair" {% if instrument.instrument_type == 'currency_pair' %}selected{% endif %}>spot</option>
               <option value="crypto_perpetual" {% if instrument.instrument_type == 'crypto_perpetual' %}selected{% endif %}>perp</option>
             </select>
@@ -36,7 +44,7 @@
           </label>
           <div class="grid gap-3 sm:grid-cols-2">
             <button id="open-instrument" class="rounded-2xl bg-sand px-4 py-3 text-sm font-semibold text-ink transition hover:bg-amber-300">Open explorer</button>
-            <a href="/quality" class="rounded-2xl bg-white/10 px-4 py-3 text-center text-sm font-semibold text-white transition hover:bg-white/20">Quality oldal</a>
+            <a href="/readiness" class="rounded-2xl bg-white/10 px-4 py-3 text-center text-sm font-semibold text-white transition hover:bg-white/20">Readiness page</a>
           </div>
         </div>
       </div>
@@ -44,6 +52,9 @@
   </div>
 </section>
 
+<!-- ════════════════════════════════════════════════════════════════════
+     TIME-RANGE CONTROLS
+     ════════════════════════════════════════════════════════════════════ -->
 <section class="glass-panel mb-8 rounded-[1.75rem] px-6 py-6 shadow-panel">
   <div class="grid gap-4 lg:grid-cols-6">
     <label class="block lg:col-span-2">
@@ -58,6 +69,7 @@
       <span class="mb-2 block text-sm font-medium text-slate-600">Primary data type</span>
       <select id="data-type-select" class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-ink outline-none">
         <option value="trade_tick">trade_tick</option>
+        <option value="order_book_deltas" selected>order_book_deltas</option>
         <option value="order_book_depths">order_book_depths</option>
       </select>
     </label>
@@ -69,27 +81,44 @@
   <div class="mt-4 flex flex-wrap gap-3">
     <button id="refresh-all" class="rounded-2xl bg-ink px-5 py-3 text-sm font-semibold text-white transition hover:bg-night">Refresh</button>
     <a id="export-trades-link" class="rounded-2xl bg-mist px-5 py-3 text-sm font-semibold text-ink transition hover:bg-slate-200" href="#">Export trades CSV</a>
+    <a id="export-deltas-link" class="rounded-2xl bg-mist px-5 py-3 text-sm font-semibold text-ink transition hover:bg-slate-200" href="#">Export deltas JSON</a>
     <a id="export-l2-link" class="rounded-2xl bg-mist px-5 py-3 text-sm font-semibold text-ink transition hover:bg-slate-200" href="#">Export L2 CSV</a>
     <a id="export-bundle-link" class="rounded-2xl bg-mist px-5 py-3 text-sm font-semibold text-ink transition hover:bg-slate-200" href="#">Export debug bundle</a>
   </div>
 </section>
 
-<section class="mb-8 grid gap-6 lg:grid-cols-2">
+<!-- ════════════════════════════════════════════════════════════════════
+     COVERAGE — 3 panels
+     ════════════════════════════════════════════════════════════════════ -->
+<section class="mb-8 grid gap-6 lg:grid-cols-3">
+  <!-- trade_tick coverage -->
   <article class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
     <div class="flex items-center justify-between gap-4">
       <div>
         <p class="text-sm uppercase tracking-[0.22em] text-sea">Coverage</p>
-        <h2 class="mt-2 text-3xl font-bold text-ink">trade_tick</h2>
+        <h2 class="mt-2 text-2xl font-bold text-ink">trade_tick</h2>
       </div>
       <span id="trade-coverage-badge" class="rounded-full bg-mist px-3 py-1 text-xs font-semibold text-ink">loading</span>
     </div>
     <div id="trade-coverage" class="mt-5 grid gap-3 sm:grid-cols-2"></div>
   </article>
+  <!-- order_book_deltas coverage (primary) -->
+  <article class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel border-2 border-sea/20">
+    <div class="flex items-center justify-between gap-4">
+      <div>
+        <p class="text-sm uppercase tracking-[0.22em] text-sea">Coverage <span class="text-xs font-bold text-sea">(primary)</span></p>
+        <h2 class="mt-2 text-2xl font-bold text-ink">order_book_deltas</h2>
+      </div>
+      <span id="delta-coverage-badge" class="rounded-full bg-mist px-3 py-1 text-xs font-semibold text-ink">loading</span>
+    </div>
+    <div id="delta-coverage" class="mt-5 grid gap-3 sm:grid-cols-2"></div>
+  </article>
+  <!-- order_book_depths coverage (optional / secondary) -->
   <article class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
     <div class="flex items-center justify-between gap-4">
       <div>
-        <p class="text-sm uppercase tracking-[0.22em] text-sea">Coverage</p>
-        <h2 class="mt-2 text-3xl font-bold text-ink">order_book_depths</h2>
+        <p class="text-sm uppercase tracking-[0.22em] text-sea">Coverage <span class="text-xs text-slate-400">(optional)</span></p>
+        <h2 class="mt-2 text-2xl font-bold text-ink">order_book_depths</h2>
       </div>
       <span id="depth-coverage-badge" class="rounded-full bg-mist px-3 py-1 text-xs font-semibold text-ink">loading</span>
     </div>
@@ -97,12 +126,181 @@
   </article>
 </section>
 
+<!-- ════════════════════════════════════════════════════════════════════
+     READINESS PANEL (server-side rendered)
+     ════════════════════════════════════════════════════════════════════ -->
+<section id="readiness-section" class="mb-8 space-y-6">
+  <div class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
+    <div class="flex items-center justify-between gap-4">
+      <div>
+        <p class="text-sm uppercase tracking-[0.22em] text-sea">Readiness</p>
+        <h2 class="mt-2 text-3xl font-bold text-ink">Backtest readiness assessment</h2>
+      </div>
+      {% if readiness %}
+      <span class="rounded-full px-4 py-2 text-sm font-bold
+        {% if readiness.is_backtest_ready %}bg-emerald-100 text-emerald-700{% else %}bg-amber-100 text-amber-700{% endif %}">
+        {% if readiness.is_backtest_ready %}Backtest ready{% else %}Not ready{% endif %}
+      </span>
+      {% endif %}
+    </div>
+
+    {% if readiness %}
+    <div class="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div class="rounded-2xl bg-mist px-4 py-3">
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">readiness score</div>
+        <div class="mt-2 text-2xl font-bold text-ink">{{ readiness.readiness_score|round(1) }}</div>
+      </div>
+      <div class="rounded-2xl bg-mist px-4 py-3">
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">is_backtest_ready</div>
+        <div class="mt-2 text-sm font-semibold {% if readiness.is_backtest_ready %}text-emerald-600{% else %}text-coral{% endif %}">{{ readiness.is_backtest_ready }}</div>
+      </div>
+      <div class="rounded-2xl bg-mist px-4 py-3">
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">is_consumable</div>
+        <div class="mt-2 text-sm font-semibold {% if readiness.is_consumable %}text-emerald-600{% else %}text-coral{% endif %}">{{ readiness.is_consumable }}</div>
+      </div>
+      <div class="rounded-2xl bg-mist px-4 py-3">
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">delta_first_only</div>
+        <div class="mt-2 text-sm font-semibold text-ink">{{ readiness.delta_first_only }}</div>
+      </div>
+    </div>
+    <div class="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div class="rounded-2xl bg-mist px-4 py-3">
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">has_trade_tick</div>
+        <div class="mt-2 text-sm font-semibold {% if readiness.has_trade_tick %}text-emerald-600{% else %}text-slate-400{% endif %}">{{ readiness.has_trade_tick }}</div>
+      </div>
+      <div class="rounded-2xl bg-mist px-4 py-3">
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">has_order_book_deltas</div>
+        <div class="mt-2 text-sm font-semibold {% if readiness.has_order_book_deltas %}text-emerald-600{% else %}text-slate-400{% endif %}">{{ readiness.has_order_book_deltas }}</div>
+      </div>
+      <div class="rounded-2xl bg-mist px-4 py-3">
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">has_order_book_depths</div>
+        <div class="mt-2 text-sm font-semibold {% if readiness.has_order_book_depths %}text-emerald-600{% else %}text-slate-400{% endif %}">{{ readiness.has_order_book_depths }} <span class="text-xs text-slate-400">(optional)</span></div>
+      </div>
+    </div>
+    <div class="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div class="rounded-2xl bg-mist px-4 py-3">
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">fenced ranges</div>
+        <div class="mt-2 text-sm font-semibold text-ink">{{ readiness.fenced_range_count }}</div>
+      </div>
+      <div class="rounded-2xl bg-mist px-4 py-3">
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">resync count</div>
+        <div class="mt-2 text-sm font-semibold text-ink">{{ readiness.resync_count }}</div>
+      </div>
+      <div class="rounded-2xl bg-mist px-4 py-3">
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">desync count</div>
+        <div class="mt-2 text-sm font-semibold {% if readiness.desync_count > 0 %}text-coral{% else %}text-ink{% endif %}">{{ readiness.desync_count }}</div>
+      </div>
+      <div class="rounded-2xl bg-mist px-4 py-3">
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">snapshot seeds</div>
+        <div class="mt-2 text-sm font-semibold text-ink">{{ readiness.snapshot_seed_count }}</div>
+      </div>
+    </div>
+    {% if readiness.limitations %}
+    <div class="mt-4">
+      <h3 class="mb-2 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Limitations</h3>
+      <ul class="space-y-1">
+        {% for lim in readiness.limitations %}
+        <li class="flex items-start gap-2 rounded-xl bg-amber-50 px-4 py-2 text-sm text-amber-700">
+          <span class="mt-0.5 text-amber-500">&#9888;</span>{{ lim }}
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    {% else %}
+    <div class="mt-6 rounded-2xl bg-mist px-4 py-3 text-sm text-slate-600">
+      Readiness data is not available for this instrument.
+    </div>
+    {% endif %}
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     REPORT CONTEXT (server-side rendered)
+     ════════════════════════════════════════════════════════════════════ -->
+{% if readiness and readiness.report and readiness.report.report_found %}
+<section id="report-context-section" class="mb-8 space-y-6">
+  <div class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
+    <div>
+      <p class="text-sm uppercase tracking-[0.22em] text-sea">Report context</p>
+      <h2 class="mt-2 text-3xl font-bold text-ink">Session boundaries, fenced intervals and events</h2>
+    </div>
+
+    <!-- Session boundaries -->
+    {% if readiness.report.session_boundaries %}
+    <div class="mt-6">
+      <h3 class="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Session boundaries</h3>
+      <div class="space-y-2">
+        {% for sb in readiness.report.session_boundaries %}
+        <div class="flex items-center gap-3 rounded-xl bg-mist px-4 py-2 text-sm">
+          <span class="rounded-full px-2 py-0.5 text-xs font-bold {% if sb.kind == 'start' %}bg-emerald-100 text-emerald-700{% else %}bg-slate-200 text-slate-600{% endif %}">{{ sb.kind }}</span>
+          <span class="font-mono text-ink">{{ sb.ts_iso }}</span>
+          {% if sb.label %}<span class="text-slate-500">{{ sb.label }}</span>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Fenced intervals -->
+    {% if readiness.report.fenced_ranges %}
+    <div class="mt-6">
+      <h3 class="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Fenced intervals</h3>
+      <div class="space-y-2">
+        {% for fr in readiness.report.fenced_ranges %}
+        <div class="rounded-xl bg-amber-50 px-4 py-3 text-sm">
+          <div class="flex items-center gap-3">
+            <span class="font-mono text-amber-700">{{ fr.start_iso }} &rarr; {{ fr.end_iso }}</span>
+          </div>
+          {% if fr.reason %}<div class="mt-1 text-xs text-amber-600">{{ fr.reason }}</div>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Resync events -->
+    {% if readiness.report.resync_events %}
+    <div class="mt-6">
+      <h3 class="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Resync / desync events</h3>
+      <div class="space-y-2">
+        {% for ev in readiness.report.resync_events %}
+        <div class="flex items-center gap-3 rounded-xl bg-mist px-4 py-2 text-sm">
+          <span class="rounded-full px-2 py-0.5 text-xs font-bold
+            {% if ev.kind == 'desync' %}bg-rose-100 text-rose-700{% elif ev.kind == 'snapshot_seed' %}bg-blue-100 text-blue-700{% else %}bg-emerald-100 text-emerald-700{% endif %}">{{ ev.kind }}</span>
+          <span class="font-mono text-ink">{{ ev.ts_iso }}</span>
+          {% if ev.detail %}<span class="text-slate-500">{{ ev.detail }}</span>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Converter warnings -->
+    {% if readiness.report.converter_warnings %}
+    <div class="mt-6">
+      <h3 class="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Converter warnings</h3>
+      <ul class="space-y-1">
+        {% for w in readiness.report.converter_warnings %}
+        <li class="rounded-xl bg-amber-50 px-4 py-2 text-sm text-amber-700">{{ w }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+
+  </div>
+</section>
+{% endif %}
+
+<!-- ════════════════════════════════════════════════════════════════════
+     TRADE SECTION
+     ════════════════════════════════════════════════════════════════════ -->
 <section id="trade-section" class="mb-8 space-y-6">
   <div class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
     <div class="flex items-center justify-between gap-4">
       <div>
         <p class="text-sm uppercase tracking-[0.22em] text-sea">TradeTick</p>
-        <h2 class="mt-2 text-3xl font-bold text-ink">Trade price és volume</h2>
+        <h2 class="mt-2 text-3xl font-bold text-ink">Trade price and volume</h2>
       </div>
       <span id="trade-status" class="text-sm text-slate-500">loading...</span>
     </div>
@@ -111,25 +309,53 @@
   </div>
 </section>
 
+<!-- ════════════════════════════════════════════════════════════════════
+     DELTA SECTION (NEW — primary order book data)
+     ════════════════════════════════════════════════════════════════════ -->
+<section id="delta-section" class="mb-8 space-y-6">
+  <div class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel border-2 border-sea/10">
+    <div class="flex items-center justify-between gap-4">
+      <div>
+        <p class="text-sm uppercase tracking-[0.22em] text-sea">OrderBookDeltas <span class="text-xs font-bold text-sea">(primary)</span></p>
+        <h2 class="mt-2 text-3xl font-bold text-ink">Delta event rate and counts</h2>
+      </div>
+      <span id="delta-status" class="text-sm text-slate-500">loading...</span>
+    </div>
+    <div id="delta-rate-chart" class="mt-6 h-[360px] w-full"></div>
+    <div id="delta-count-chart" class="mt-6 h-[320px] w-full"></div>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     DEPTH10 SECTION (conditional — show info if absent)
+     ════════════════════════════════════════════════════════════════════ -->
 <section id="depth-section" class="mb-8 space-y-6">
   <div class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
     <div class="flex items-center justify-between gap-4">
       <div>
-        <p class="text-sm uppercase tracking-[0.22em] text-sea">OrderBookDepth10</p>
+        <p class="text-sm uppercase tracking-[0.22em] text-sea">OrderBookDepth10 <span class="text-xs text-slate-400">(optional)</span></p>
         <h2 class="mt-2 text-3xl font-bold text-ink">Best bid/ask, spread, mid</h2>
       </div>
       <span id="depth-status" class="text-sm text-slate-500">loading...</span>
+    </div>
+    <div id="depth-absent-notice" class="mt-6 hidden rounded-2xl bg-blue-50 px-5 py-4 text-sm text-blue-700">
+      <strong>Depth10 not available</strong> &mdash; this is normal for delta-first datasets.
+      Depth10 snapshots are optional; all primary data comes from order_book_deltas.
     </div>
     <div id="depth-price-chart" class="mt-6 h-[360px] w-full"></div>
     <div id="depth-update-chart" class="mt-6 h-[320px] w-full"></div>
   </div>
 </section>
 
-<section class="mb-8 grid gap-6 xl:grid-cols-[1.3fr,0.7fr]">
+<!-- ════════════════════════════════════════════════════════════════════
+     DEPTH10 SNAPSHOT VIEWER (optional) + QUALITY PANEL (secondary)
+     ════════════════════════════════════════════════════════════════════ -->
+<section id="snapshot-quality-section" class="mb-8 grid gap-6 xl:grid-cols-[1.3fr,0.7fr]">
+  <!-- Snapshot viewer -->
   <article class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
     <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
       <div>
-        <p class="text-sm uppercase tracking-[0.22em] text-sea">Snapshot viewer</p>
+        <p class="text-sm uppercase tracking-[0.22em] text-sea">Depth10 snapshot viewer <span class="text-xs text-slate-400">(optional)</span></p>
         <h2 class="mt-2 text-3xl font-bold text-ink">Nearest snapshot + ladder</h2>
       </div>
       <div class="flex flex-wrap gap-2">
@@ -141,19 +367,24 @@
         <button class="snapshot-step rounded-full bg-mist px-3 py-2 text-xs font-semibold text-ink" data-step="100">+100</button>
       </div>
     </div>
-    <div class="mt-5 grid gap-4 lg:grid-cols-3">
-      <label class="block lg:col-span-2">
-        <span class="mb-2 block text-sm font-medium text-slate-600">Nearest snapshot to UTC time</span>
-        <input id="snapshot-time-input" type="datetime-local" class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-ink outline-none">
-      </label>
-      <label class="block">
-        <span class="mb-2 block text-sm font-medium text-slate-600">Index</span>
-        <input id="snapshot-index-input" type="number" min="0" step="1" class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-ink outline-none">
-      </label>
+    <div id="snapshot-absent-notice" class="mt-5 hidden rounded-2xl bg-blue-50 px-5 py-4 text-sm text-blue-700">
+      Depth10 snapshots are not available for this instrument. This is expected for delta-first datasets.
     </div>
-    <div class="mt-4 flex flex-wrap gap-3">
-      <button id="find-nearest-snapshot" class="rounded-2xl bg-ink px-4 py-3 text-sm font-semibold text-white transition hover:bg-night">Nearest snapshot</button>
-      <button id="load-index-snapshot" class="rounded-2xl bg-mist px-4 py-3 text-sm font-semibold text-ink transition hover:bg-slate-200">Load index</button>
+    <div id="snapshot-controls" class="mt-5">
+      <div class="grid gap-4 lg:grid-cols-3">
+        <label class="block lg:col-span-2">
+          <span class="mb-2 block text-sm font-medium text-slate-600">Nearest snapshot to UTC time</span>
+          <input id="snapshot-time-input" type="datetime-local" class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-ink outline-none">
+        </label>
+        <label class="block">
+          <span class="mb-2 block text-sm font-medium text-slate-600">Index</span>
+          <input id="snapshot-index-input" type="number" min="0" step="1" class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-ink outline-none">
+        </label>
+      </div>
+      <div class="mt-4 flex flex-wrap gap-3">
+        <button id="find-nearest-snapshot" class="rounded-2xl bg-ink px-4 py-3 text-sm font-semibold text-white transition hover:bg-night">Nearest snapshot</button>
+        <button id="load-index-snapshot" class="rounded-2xl bg-mist px-4 py-3 text-sm font-semibold text-ink transition hover:bg-slate-200">Load index</button>
+      </div>
     </div>
     <div id="snapshot-summary" class="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4"></div>
     <div id="depth-ladder-chart" class="mt-6 h-[360px] w-full"></div>
@@ -184,10 +415,15 @@
       </div>
     </div>
   </article>
-  <article class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
+
+  <!-- Quality panel (secondary — depth10 only) -->
+  <article id="quality-panel" class="glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
     <div>
-      <p class="text-sm uppercase tracking-[0.22em] text-sea">Quality panel</p>
+      <p class="text-sm uppercase tracking-[0.22em] text-sea">Quality panel <span class="text-xs text-slate-400">(depth10, secondary)</span></p>
       <h2 class="mt-2 text-3xl font-bold text-ink">Crossed, monotonic, gaps</h2>
+    </div>
+    <div id="quality-absent-notice" class="mt-6 hidden rounded-2xl bg-blue-50 px-5 py-4 text-sm text-blue-700">
+      Quality panel requires depth10 data, which is not present for this instrument.
     </div>
     <div id="quality-cards" class="mt-6 grid gap-3 sm:grid-cols-2"></div>
     <div class="mt-6">
@@ -196,7 +432,7 @@
     </div>
     <div class="mt-6">
       <div class="flex items-center justify-between gap-4">
-        <h3 class="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Hibás snapshotok</h3>
+        <h3 class="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Bad snapshots</h3>
         <span id="quality-status" class="text-xs text-slate-500">loading...</span>
       </div>
       <div id="quality-issues" class="mt-3 space-y-2"></div>
@@ -209,8 +445,13 @@
 
 {% block scripts %}
 <script>
+  /* ═══════════════════════════════════════════════════════════════════
+     STATE & DOM REFERENCES
+     ═══════════════════════════════════════════════════════════════════ */
   const inventory = JSON.parse(document.getElementById('inventory-data').textContent || '[]');
   const initialInstrumentId = '{{ instrument.instrument_id }}';
+  const hasDepth10 = {{ 'true' if has_depth10 else 'false' }};
+
   const fromInput = document.getElementById('from-input');
   const toInput = document.getElementById('to-input');
   const instrumentTypeFilter = document.getElementById('instrument-type-filter');
@@ -225,10 +466,14 @@
   const findNearestSnapshotButton = document.getElementById('find-nearest-snapshot');
   const loadIndexSnapshotButton = document.getElementById('load-index-snapshot');
   const exportTradesLink = document.getElementById('export-trades-link');
+  const exportDeltasLink = document.getElementById('export-deltas-link');
   const exportL2Link = document.getElementById('export-l2-link');
   const exportBundleLink = document.getElementById('export-bundle-link');
   let currentSnapshotIndex = null;
 
+  /* ═══════════════════════════════════════════════════════════════════
+     HELPERS
+     ═══════════════════════════════════════════════════════════════════ */
   function currentInstrumentId() {
     return instrumentPicker.value.trim() || initialInstrumentId;
   }
@@ -271,17 +516,31 @@
   function updateExportLinks() {
     const params = currentRangeParams();
     exportTradesLink.href = `/api/export?${buildQuery({ ...params, kind: 'trades' })}`;
+    exportDeltasLink.href = `/api/export?${buildQuery({ ...params, kind: 'deltas' })}`;
     exportL2Link.href = `/api/export?${buildQuery({ ...params, kind: 'l2' })}`;
     exportBundleLink.href = `/api/export?${buildQuery({ ...params, kind: 'bundle' })}`;
   }
 
+  async function fetchJson(path, params) {
+    const query = buildQuery(params);
+    const response = await fetch(`${path}?${query}`);
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text);
+    }
+    return response.json();
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════
+     COVERAGE
+     ═══════════════════════════════════════════════════════════════════ */
   function renderCoverage(targetId, badgeId, summary) {
     const target = document.getElementById(targetId);
     const badge = document.getElementById(badgeId);
     if (!target || !badge) return;
     if (!summary || !summary.present) {
-      badge.textContent = 'nincs adat';
-      target.innerHTML = '<div class="rounded-2xl bg-mist px-4 py-3 text-sm text-slate-600">Nincs adat ebben az idősávban.</div>';
+      badge.textContent = 'no data';
+      target.innerHTML = '<div class="rounded-2xl bg-mist px-4 py-3 text-sm text-slate-600">No data in this time range.</div>';
       return;
     }
 
@@ -289,11 +548,11 @@
     target.innerHTML = `
       <div class="rounded-2xl bg-mist px-4 py-3">
         <div class="text-xs uppercase tracking-[0.18em] text-slate-500">ts_event range</div>
-        <div class="mt-2 text-sm text-ink">${summary.ts_event_min_iso || '—'}<br>${summary.ts_event_max_iso || '—'}</div>
+        <div class="mt-2 text-sm text-ink">${summary.ts_event_min_iso || '\u2014'}<br>${summary.ts_event_max_iso || '\u2014'}</div>
       </div>
       <div class="rounded-2xl bg-mist px-4 py-3">
         <div class="text-xs uppercase tracking-[0.18em] text-slate-500">max gap</div>
-        <div class="mt-2 text-sm font-semibold text-ink">${summary.max_gap_seconds ? `${summary.max_gap_seconds.toFixed(3)} s` : '—'}</div>
+        <div class="mt-2 text-sm font-semibold text-ink">${summary.max_gap_seconds ? `${summary.max_gap_seconds.toFixed(3)} s` : '\u2014'}</div>
       </div>
       <div class="rounded-2xl bg-mist px-4 py-3">
         <div class="text-xs uppercase tracking-[0.18em] text-slate-500">missing ratio est.</div>
@@ -306,6 +565,51 @@
     `;
   }
 
+  async function loadCoverage() {
+    const params = currentRangeParams();
+    const coverage = await fetchJson('/api/coverage', params);
+    renderCoverage('trade-coverage', 'trade-coverage-badge', coverage.coverage.trade_tick);
+    renderCoverage('delta-coverage', 'delta-coverage-badge', coverage.coverage.order_book_deltas);
+    renderCoverage('depth-coverage', 'depth-coverage-badge', coverage.coverage.order_book_depths);
+
+    // Update depth10 availability from live API
+    const depthPresent = coverage.coverage.order_book_depths && coverage.coverage.order_book_depths.present;
+    toggleDepth10Sections(depthPresent);
+  }
+
+  function toggleDepth10Sections(depthPresent) {
+    const depthAbsent = document.getElementById('depth-absent-notice');
+    const depthPriceChart = document.getElementById('depth-price-chart');
+    const depthUpdateChart = document.getElementById('depth-update-chart');
+    const snapshotAbsent = document.getElementById('snapshot-absent-notice');
+    const snapshotControls = document.getElementById('snapshot-controls');
+    const qualityAbsent = document.getElementById('quality-absent-notice');
+    const qualityCards = document.getElementById('quality-cards');
+
+    if (!depthPresent) {
+      depthAbsent?.classList.remove('hidden');
+      depthPriceChart && (depthPriceChart.style.display = 'none');
+      depthUpdateChart && (depthUpdateChart.style.display = 'none');
+      snapshotAbsent?.classList.remove('hidden');
+      snapshotControls && (snapshotControls.style.display = 'none');
+      qualityAbsent?.classList.remove('hidden');
+      qualityCards && (qualityCards.style.display = 'none');
+      document.getElementById('depth-status').textContent = 'not available';
+      document.getElementById('quality-status').textContent = 'not available';
+    } else {
+      depthAbsent?.classList.add('hidden');
+      depthPriceChart && (depthPriceChart.style.display = '');
+      depthUpdateChart && (depthUpdateChart.style.display = '');
+      snapshotAbsent?.classList.add('hidden');
+      snapshotControls && (snapshotControls.style.display = '');
+      qualityAbsent?.classList.add('hidden');
+      qualityCards && (qualityCards.style.display = '');
+    }
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════
+     TRADE CHARTS
+     ═══════════════════════════════════════════════════════════════════ */
   function renderTradeCharts(raw, agg) {
     const priceChart = document.getElementById('trade-price-chart');
     const volumeChart = document.getElementById('trade-volume-chart');
@@ -313,7 +617,7 @@
     status.textContent = `${raw.returned_points}/${raw.total_rows} raw points`;
 
     if (!raw.points.length) {
-      priceChart.innerHTML = '<div class="flex h-full items-center justify-center rounded-3xl bg-mist text-sm text-slate-500">Nincs trade adat.</div>';
+      priceChart.innerHTML = '<div class="flex h-full items-center justify-center rounded-3xl bg-mist text-sm text-slate-500">No trade data.</div>';
       volumeChart.innerHTML = '';
       return;
     }
@@ -322,8 +626,8 @@
       {
         type: 'scattergl',
         mode: 'lines',
-        x: raw.points.map((point) => point.ts_event_iso),
-        y: raw.points.map((point) => point.price),
+        x: raw.points.map((p) => p.ts_event_iso),
+        y: raw.points.map((p) => p.price),
         line: { color: '#0F766E', width: 1.8 },
         name: 'trade price',
       },
@@ -339,16 +643,16 @@
     Plotly.newPlot(volumeChart, [
       {
         type: 'bar',
-        x: agg.points.map((point) => point.ts_event_iso),
-        y: agg.points.map((point) => point.volume || 0),
+        x: agg.points.map((p) => p.ts_event_iso),
+        y: agg.points.map((p) => p.volume || 0),
         marker: { color: '#F4B860' },
         name: 'volume',
       },
       {
         type: 'scatter',
         mode: 'lines',
-        x: agg.points.map((point) => point.ts_event_iso),
-        y: agg.points.map((point) => point.trade_count || 0),
+        x: agg.points.map((p) => p.ts_event_iso),
+        y: agg.points.map((p) => p.trade_count || 0),
         yaxis: 'y2',
         line: { color: '#E76F51', width: 2 },
         name: 'trade count',
@@ -365,6 +669,103 @@
     }, { responsive: true });
   }
 
+  async function loadTrades() {
+    const params = currentRangeParams();
+    const bucket_s = Number(bucketInput.value || 60);
+    const [raw, agg] = await Promise.all([
+      fetchJson('/api/trades', { ...params, mode: 'raw', max_points: 5000 }),
+      fetchJson('/api/trades', { ...params, mode: 'agg', bucket_s, max_points: 2000 }),
+    ]);
+    renderTradeCharts(raw, agg);
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════
+     DELTA CHARTS (NEW)
+     ═══════════════════════════════════════════════════════════════════ */
+  function renderDeltaCharts(raw, agg) {
+    const rateChart = document.getElementById('delta-rate-chart');
+    const countChart = document.getElementById('delta-count-chart');
+    const status = document.getElementById('delta-status');
+    status.textContent = `${raw.returned_points}/${raw.total_rows} raw points`;
+
+    if (!agg.points.length && !raw.points.length) {
+      rateChart.innerHTML = '<div class="flex h-full items-center justify-center rounded-3xl bg-mist text-sm text-slate-500">No delta data.</div>';
+      countChart.innerHTML = '';
+      return;
+    }
+
+    // Delta event rate chart — aggregated delta_count per bucket
+    Plotly.newPlot(rateChart, [
+      {
+        type: 'bar',
+        x: agg.points.map((p) => p.ts_event_iso),
+        y: agg.points.map((p) => p.delta_count || 0),
+        marker: { color: '#0F766E' },
+        name: 'deltas/bucket',
+      },
+    ], {
+      margin: { t: 20, r: 20, b: 50, l: 60 },
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      xaxis: { title: 'UTC time' },
+      yaxis: { title: 'Delta event count' },
+      font: { color: '#10212B' },
+    }, { responsive: true });
+
+    // Delta action breakdown chart
+    Plotly.newPlot(countChart, [
+      {
+        type: 'bar',
+        x: agg.points.map((p) => p.ts_event_iso),
+        y: agg.points.map((p) => p.add_count || 0),
+        marker: { color: '#0F766E' },
+        name: 'ADD',
+      },
+      {
+        type: 'bar',
+        x: agg.points.map((p) => p.ts_event_iso),
+        y: agg.points.map((p) => p.update_count || 0),
+        marker: { color: '#F4B860' },
+        name: 'UPDATE',
+      },
+      {
+        type: 'bar',
+        x: agg.points.map((p) => p.ts_event_iso),
+        y: agg.points.map((p) => p.delete_count || 0),
+        marker: { color: '#E76F51' },
+        name: 'DELETE',
+      },
+      {
+        type: 'bar',
+        x: agg.points.map((p) => p.ts_event_iso),
+        y: agg.points.map((p) => p.clear_count || 0),
+        marker: { color: '#10212B' },
+        name: 'CLEAR',
+      },
+    ], {
+      margin: { t: 20, r: 20, b: 50, l: 60 },
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      xaxis: { title: 'UTC time' },
+      yaxis: { title: 'Count by action' },
+      barmode: 'stacked',
+      font: { color: '#10212B' },
+    }, { responsive: true });
+  }
+
+  async function loadDeltas() {
+    const params = currentRangeParams();
+    const bucket_s = Number(bucketInput.value || 60);
+    const [raw, agg] = await Promise.all([
+      fetchJson('/api/deltas', { ...params, mode: 'raw', max_points: 5000 }),
+      fetchJson('/api/deltas', { ...params, mode: 'agg', bucket_s, max_points: 2000 }),
+    ]);
+    renderDeltaCharts(raw, agg);
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════
+     DEPTH10 CHARTS (only if present)
+     ═══════════════════════════════════════════════════════════════════ */
   function renderDepthCharts(raw, agg) {
     const priceChart = document.getElementById('depth-price-chart');
     const updateChart = document.getElementById('depth-update-chart');
@@ -372,7 +773,7 @@
     status.textContent = `${raw.returned_points}/${raw.total_rows} raw points`;
 
     if (!raw.points.length) {
-      priceChart.innerHTML = '<div class="flex h-full items-center justify-center rounded-3xl bg-mist text-sm text-slate-500">Nincs depth adat.</div>';
+      priceChart.innerHTML = '<div class="flex h-full items-center justify-center rounded-3xl bg-mist text-sm text-slate-500">No depth data.</div>';
       updateChart.innerHTML = '';
       return;
     }
@@ -381,29 +782,29 @@
       {
         type: 'scattergl',
         mode: 'lines',
-        x: raw.points.map((point) => point.ts_event_iso),
-        y: raw.points.map((point) => point.best_bid),
+        x: raw.points.map((p) => p.ts_event_iso),
+        y: raw.points.map((p) => p.best_bid),
         line: { color: '#0F766E', width: 1.8 },
         name: 'best_bid',
-        customdata: raw.points.map((point) => point.ts_event_ns),
+        customdata: raw.points.map((p) => p.ts_event_ns),
       },
       {
         type: 'scattergl',
         mode: 'lines',
-        x: raw.points.map((point) => point.ts_event_iso),
-        y: raw.points.map((point) => point.best_ask),
+        x: raw.points.map((p) => p.ts_event_iso),
+        y: raw.points.map((p) => p.best_ask),
         line: { color: '#E76F51', width: 1.8 },
         name: 'best_ask',
-        customdata: raw.points.map((point) => point.ts_event_ns),
+        customdata: raw.points.map((p) => p.ts_event_ns),
       },
       {
         type: 'scattergl',
         mode: 'lines',
-        x: raw.points.map((point) => point.ts_event_iso),
-        y: raw.points.map((point) => point.mid),
+        x: raw.points.map((p) => p.ts_event_iso),
+        y: raw.points.map((p) => p.mid),
         line: { color: '#10212B', width: 1.2, dash: 'dot' },
         name: 'mid',
-        customdata: raw.points.map((point) => point.ts_event_ns),
+        customdata: raw.points.map((p) => p.ts_event_ns),
       },
     ], {
       margin: { t: 20, r: 20, b: 50, l: 60 },
@@ -422,16 +823,16 @@
     Plotly.newPlot(updateChart, [
       {
         type: 'bar',
-        x: agg.points.map((point) => point.ts_event_iso),
-        y: agg.points.map((point) => point.update_rate_per_minute || 0),
+        x: agg.points.map((p) => p.ts_event_iso),
+        y: agg.points.map((p) => p.update_rate_per_minute || 0),
         marker: { color: '#0F766E' },
         name: 'updates/min',
       },
       {
         type: 'scatter',
         mode: 'lines',
-        x: agg.points.map((point) => point.ts_event_iso),
-        y: agg.points.map((point) => point.spread || 0),
+        x: agg.points.map((p) => p.ts_event_iso),
+        y: agg.points.map((p) => p.spread || 0),
         yaxis: 'y2',
         line: { color: '#E76F51', width: 2 },
         name: 'spread',
@@ -447,13 +848,27 @@
     }, { responsive: true });
   }
 
+  async function loadL2Timeseries() {
+    if (!hasDepth10) return;
+    const params = currentRangeParams();
+    const bucket_s = Number(bucketInput.value || 60);
+    const [raw, agg] = await Promise.all([
+      fetchJson('/api/l2/timeseries', { ...params, mode: 'raw', max_points: 5000 }),
+      fetchJson('/api/l2/timeseries', { ...params, mode: 'agg', bucket_s, max_points: 2000 }),
+    ]);
+    renderDepthCharts(raw, agg);
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════
+     SNAPSHOT
+     ═══════════════════════════════════════════════════════════════════ */
   function renderSnapshot(snapshotResponse) {
     const summary = document.getElementById('snapshot-summary');
     const bidBody = document.getElementById('bid-ladder-body');
     const askBody = document.getElementById('ask-ladder-body');
     const chart = document.getElementById('depth-ladder-chart');
     if (!snapshotResponse.snapshot) {
-      summary.innerHTML = '<div class="rounded-2xl bg-mist px-4 py-3 text-sm text-slate-600">Nincs találat.</div>';
+      summary.innerHTML = '<div class="rounded-2xl bg-mist px-4 py-3 text-sm text-slate-600">No match found.</div>';
       bidBody.innerHTML = '';
       askBody.innerHTML = '';
       chart.innerHTML = '';
@@ -467,7 +882,7 @@
     summary.innerHTML = `
       <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">index</div><div class="mt-2 text-sm font-semibold text-ink">${snapshot.index}</div></div>
       <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">ts_event</div><div class="mt-2 text-sm font-semibold text-ink">${snapshot.ts_event_iso}</div></div>
-      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">spread</div><div class="mt-2 text-sm font-semibold text-ink">${snapshot.spread ?? '—'}</div></div>
+      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">spread</div><div class="mt-2 text-sm font-semibold text-ink">${snapshot.spread ?? '\u2014'}</div></div>
       <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">issues</div><div class="mt-2 text-sm font-semibold text-ink">${snapshot.issues.join(', ') || 'none'}</div></div>
     `;
 
@@ -514,6 +929,16 @@
     }, { responsive: true });
   }
 
+  async function loadSnapshot(extra) {
+    if (!hasDepth10) return;
+    const params = { instrument_id: currentInstrumentId(), ...extra };
+    const response = await fetchJson('/api/l2/snapshot', params);
+    renderSnapshot(response);
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════
+     QUALITY (depth10 only, secondary)
+     ═══════════════════════════════════════════════════════════════════ */
   function renderQuality(quality) {
     const cards = document.getElementById('quality-cards');
     const gaps = document.getElementById('quality-gaps');
@@ -535,7 +960,7 @@
         <div class="text-sm font-semibold text-ink">${gap.gap_seconds.toFixed(3)} s ${gap.is_session_break ? '<span class="text-coral">(session break)</span>' : ''}</div>
         <div class="mt-1 text-xs text-slate-500">${gap.previous_ts_event_iso} -> ${gap.next_ts_event_iso}</div>
       </div>
-    `).join('') || '<div class="rounded-2xl bg-mist px-4 py-3 text-sm text-slate-600">Nincs outlier gap.</div>';
+    `).join('') || '<div class="rounded-2xl bg-mist px-4 py-3 text-sm text-slate-600">No outlier gaps.</div>';
 
     issues.innerHTML = quality.bad_snapshots.map((issue) => `
       <button data-index="${issue.index}" class="quality-issue block w-full rounded-2xl bg-white px-4 py-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
@@ -545,78 +970,60 @@
         </div>
         <div class="mt-2 text-xs text-rose-600">${issue.issues.join(', ')}</div>
       </button>
-    `).join('') || '<div class="rounded-2xl bg-mist px-4 py-3 text-sm text-slate-600">Nincs hibás snapshot a kiválasztott idősávban.</div>';
+    `).join('') || '<div class="rounded-2xl bg-mist px-4 py-3 text-sm text-slate-600">No bad snapshots in the selected time range.</div>';
 
     document.querySelectorAll('.quality-issue').forEach((button) => {
       button.addEventListener('click', () => loadSnapshot({ index: button.dataset.index }));
     });
   }
 
-  async function fetchJson(path, params) {
-    const query = buildQuery(params);
-    const response = await fetch(`${path}?${query}`);
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(text);
-    }
-    return response.json();
-  }
-
-  async function loadCoverage() {
-    const params = currentRangeParams();
-    const coverage = await fetchJson('/api/coverage', params);
-    renderCoverage('trade-coverage', 'trade-coverage-badge', coverage.coverage.trade_tick);
-    renderCoverage('depth-coverage', 'depth-coverage-badge', coverage.coverage.order_book_depths);
-  }
-
-  async function loadTrades() {
-    const params = currentRangeParams();
-    const bucket_s = Number(bucketInput.value || 60);
-    const [raw, agg] = await Promise.all([
-      fetchJson('/api/trades', { ...params, mode: 'raw', max_points: 5000 }),
-      fetchJson('/api/trades', { ...params, mode: 'agg', bucket_s, max_points: 2000 }),
-    ]);
-    renderTradeCharts(raw, agg);
-  }
-
-  async function loadL2Timeseries() {
-    const params = currentRangeParams();
-    const bucket_s = Number(bucketInput.value || 60);
-    const [raw, agg] = await Promise.all([
-      fetchJson('/api/l2/timeseries', { ...params, mode: 'raw', max_points: 5000 }),
-      fetchJson('/api/l2/timeseries', { ...params, mode: 'agg', bucket_s, max_points: 2000 }),
-    ]);
-    renderDepthCharts(raw, agg);
-  }
-
   async function loadQuality() {
+    if (!hasDepth10) return;
     const params = currentRangeParams();
     const quality = await fetchJson('/api/l2/quality', params);
     renderQuality(quality);
   }
 
-  async function loadSnapshot(extra) {
-    const params = { instrument_id: currentInstrumentId(), ...extra };
-    const response = await fetchJson('/api/l2/snapshot', params);
-    renderSnapshot(response);
-  }
-
+  /* ═══════════════════════════════════════════════════════════════════
+     REFRESH ALL
+     ═══════════════════════════════════════════════════════════════════ */
   async function refreshAll() {
     updateExportLinks();
-    await Promise.all([loadCoverage(), loadTrades(), loadL2Timeseries(), loadQuality()]);
-    await loadSnapshot({ ts: normalizeDatetimeLocal(toInput.value || fromInput.value) || undefined });
-    document.getElementById(dataTypeSelect.value === 'trade_tick' ? 'trade-section' : 'depth-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    toggleDepth10Sections(hasDepth10);
+
+    const tasks = [loadCoverage(), loadTrades(), loadDeltas()];
+    if (hasDepth10) {
+      tasks.push(loadL2Timeseries(), loadQuality());
+    }
+    await Promise.all(tasks);
+
+    if (hasDepth10) {
+      await loadSnapshot({ ts: normalizeDatetimeLocal(toInput.value || fromInput.value) || undefined });
+    }
+
+    // Scroll to primary section based on selected data type
+    const scrollTarget = dataTypeSelect.value === 'trade_tick' ? 'trade-section'
+      : dataTypeSelect.value === 'order_book_deltas' ? 'delta-section'
+      : 'depth-section';
+    document.getElementById(scrollTarget)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
+  /* ═══════════════════════════════════════════════════════════════════
+     EVENT LISTENERS & INIT
+     ═══════════════════════════════════════════════════════════════════ */
   instrumentTypeFilter?.addEventListener('change', renderInstrumentOptions);
   openInstrumentButton?.addEventListener('click', openInstrument);
   instrumentPicker?.addEventListener('change', updateExportLinks);
   refreshAllButton?.addEventListener('click', refreshAll);
-  findNearestSnapshotButton?.addEventListener('click', () => loadSnapshot({ ts: normalizeDatetimeLocal(snapshotTimeInput.value) }));
-  loadIndexSnapshotButton?.addEventListener('click', () => loadSnapshot({ index: snapshotIndexInput.value }));
+  findNearestSnapshotButton?.addEventListener('click', () => {
+    if (hasDepth10) loadSnapshot({ ts: normalizeDatetimeLocal(snapshotTimeInput.value) });
+  });
+  loadIndexSnapshotButton?.addEventListener('click', () => {
+    if (hasDepth10) loadSnapshot({ index: snapshotIndexInput.value });
+  });
   document.querySelectorAll('.snapshot-step').forEach((button) => {
     button.addEventListener('click', () => {
-      if (currentSnapshotIndex === null) return;
+      if (!hasDepth10 || currentSnapshotIndex === null) return;
       loadSnapshot({ index: currentSnapshotIndex + Number(button.dataset.step) });
     });
   });

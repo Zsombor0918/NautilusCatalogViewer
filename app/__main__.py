@@ -16,17 +16,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    serve_parser = subparsers.add_parser("serve", help="FastAPI web app indítása.")
+    serve_parser = subparsers.add_parser("serve", help="Start FastAPI web app.")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8000)
     serve_parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_ROOT)
     serve_parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE_PATH)
 
-    audit_parser = subparsers.add_parser("audit", help="CLI audit futtatása.")
+    audit_parser = subparsers.add_parser("audit", help="Run CLI audit.")
     audit_parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_ROOT)
     audit_parser.add_argument("--out", type=Path, default=Path("state/audit.json"))
-    audit_parser.add_argument("--first-n", type=int, default=10, help="Első N depth snapshot mintavétele.")
-    audit_parser.add_argument("--random-n", type=int, default=10, help="Random N depth snapshot mintavétele.")
+    audit_parser.add_argument(
+        "--first-n", type=int, default=10,
+        help="Sample first N depth snapshots.",
+    )
+    audit_parser.add_argument(
+        "--random-n", type=int, default=10,
+        help="Sample random N depth snapshots.",
+    )
 
     return parser
 
@@ -44,15 +50,22 @@ def audit_command(args: argparse.Namespace) -> int:
         first_n=args.first_n,
         random_n=args.random_n,
     )
-    print(f"Audit kész: {audit.catalog_root}")
-    print(f"Instrumentek: {audit.summary.instrument_count}")
-    print(f"trade_tick coverage: {audit.summary.data_type_coverage['trade_tick']}")
-    print(f"order_book_depths coverage: {audit.summary.data_type_coverage['order_book_depths']}")
-    print(f"L2 sampled snapshots: {audit.summary.l2_sampled_snapshot_count}")
-    print(f"L2 bad snapshots: {audit.summary.l2_bad_count}")
-    print(f"Overall crossed rate: {audit.summary.overall_crossed_rate:.4%}")
-    print(f"Overall quality score: {audit.summary.overall_quality_score:.2f}")
-    print(f"Kimenet: {Path(args.out).expanduser().resolve()}")
+
+    s = audit.summary
+    dtc = s.data_type_coverage
+
+    print(f"Audit complete: {audit.catalog_root}")
+    print(f"Instruments: {s.instrument_count}")
+    print(f"trade_tick coverage: {dtc.get('trade_tick', 0)}")
+    print(f"order_book_deltas coverage: {dtc.get('order_book_deltas', 0)}")
+    print(f"order_book_depths coverage (optional): {dtc.get('order_book_depths', 0)}")
+    print(f"backtest_ready_count: {s.backtest_ready_count}")
+    print(f"consumable_count: {s.consumable_count}")
+    print(f"avg_readiness_score: {s.avg_readiness_score:.2f}")
+    print(f"total_fenced_range_count: {s.total_fenced_range_count}")
+    print(f"total_desync_count: {s.total_desync_count}")
+    print(f"Output: {Path(args.out).expanduser().resolve()}")
+
     return 0
 
 
@@ -65,7 +78,7 @@ def main() -> int:
     if args.command == "audit":
         return audit_command(args)
 
-    parser.error("Ismeretlen parancs.")
+    parser.error("Unknown command.")
     return 2
 
 

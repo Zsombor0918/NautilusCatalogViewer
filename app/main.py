@@ -9,19 +9,22 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
 from .catalog_scan import CatalogScanner
 from .models import (
     AuditResponse,
     CoverageResponse,
+    DeltasResponse,
+    DeltasSummaryResponse,
     InstrumentSearchResponse,
     InventoryResponse,
     L2QualityResponse,
     L2SnapshotResponse,
     L2TimeseriesResponse,
     ProgressResponse,
+    ReadinessResponse,
     TradesResponse,
 )
 from .query import CatalogQueryService
@@ -33,6 +36,9 @@ DEFAULT_CATALOG_ROOT = Path(
 ).expanduser()
 DEFAULT_CACHE_PATH = PROJECT_ROOT / "state" / "web_audit_cache.json"
 TEMPLATES = Jinja2Templates(directory=str(PROJECT_ROOT / "templates"))
+
+
+# ── Jinja2 template filters ────────────────────────────────────────────────────────────────────────
 
 
 def _format_int(value: Any) -> str:
@@ -76,12 +82,18 @@ TEMPLATES.env.filters["format_progress_pct"] = _format_progress_pct
 TEMPLATES.env.filters["format_float"] = _format_float
 
 
+# ── Runtime state ────────────────────────────────────────────────────────────────────────────
+
+
 @dataclass
 class RuntimeState:
     lock: threading.Lock = field(default_factory=threading.Lock)
     progress: ProgressResponse = field(default_factory=ProgressResponse)
     latest_audit: AuditResponse | None = None
     worker: threading.Thread | None = None
+
+
+# ── Helpers ─────────────────────────────────────────────────────────────────────────────────
 
 
 def _percent(completed_steps: int, total_steps: int) -> float:
@@ -147,6 +159,9 @@ def _default_instrument_range(audit: AuditResponse | None, instrument_id: str) -
     return (min(start_candidates) if start_candidates else None, max(end_candidates) if end_candidates else None)
 
 
+# ── Background audit worker ──────────────────────────────────────────────────────────────────
+
+
 def _run_audit_worker(app: FastAPI, started_at: str) -> None:
     scanner: CatalogScanner = app.state.scanner
     runtime: RuntimeState = app.state.runtime
@@ -172,7 +187,7 @@ def _run_audit_worker(app: FastAPI, started_at: str) -> None:
                 runtime,
                 status="completed",
                 phase="done",
-                message="Audit kész, a cache fájl frissült.",
+                message="Audit complete, cache file updated.",
                 completed_steps=max(1, runtime.progress.total_steps),
                 total_steps=max(1, runtime.progress.total_steps),
                 started_at=started_at,
@@ -186,7 +201,7 @@ def _run_audit_worker(app: FastAPI, started_at: str) -> None:
                 runtime,
                 status="failed",
                 phase="failed",
-                message="Az audit hiba miatt leállt.",
+                message="Audit stopped due to an error.",
                 completed_steps=runtime.progress.completed_steps,
                 total_steps=runtime.progress.total_steps,
                 started_at=started_at,
@@ -197,8 +212,11 @@ def _run_audit_worker(app: FastAPI, started_at: str) -> None:
             runtime.worker = None
 
 
+# ── Application factory ──────────────────────────────────────────────────────────────────────
+
+
 def create_app(catalog_root: Path | str = DEFAULT_CATALOG_ROOT, cache_path: Path | str = DEFAULT_CACHE_PATH) -> FastAPI:
-    app = FastAPI(title="Nautilus Catalog Viewer", version="0.2.0", docs_url="/docs", redoc_url="/redoc")
+    app = FastAPI(title="Nautilus Catalog Viewer", version="0.3.0", docs_url="/docs", redoc_url="/redoc")
     scanner = CatalogScanner(catalog_root=catalog_root, cache_path=cache_path)
     query_service: CatalogQueryService = scanner.query_service
     runtime = RuntimeState()
@@ -207,7 +225,7 @@ def create_app(catalog_root: Path | str = DEFAULT_CATALOG_ROOT, cache_path: Path
         runtime.progress = ProgressResponse(
             status="completed",
             phase="idle",
-            message="Cache-elt audit betöltve.",
+            message="Cached audit loaded.",
             completed_steps=1,
             total_steps=1,
             percent=100.0,
@@ -218,6 +236,8 @@ def create_app(catalog_root: Path | str = DEFAULT_CATALOG_ROOT, cache_path: Path
     app.state.scanner = scanner
     app.state.query_service = query_service
     app.state.runtime = runtime
+
+    # ── HTML pages ──────────────────────────────────────────────────────────────────────
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request) -> HTMLResponse:
@@ -231,6 +251,10 @@ def create_app(catalog_root: Path | str = DEFAULT_CATALOG_ROOT, cache_path: Path
             [item.model_dump(mode="json") for item in inventory.instruments],
             ensure_ascii=False,
         )
+        # Readiness summary from audit
+        backtest_ready_count = audit.summary.backtest_ready_count if audit else 0
+        consumable_count = audit.summary.consumable_count if audit else 0
+        avg_readiness_score = audit.summary.avg_readiness_score if audit else 0.0
         return TEMPLATES.TemplateResponse(
             request=request,
             name="index.html",
@@ -241,6 +265,9 @@ def create_app(catalog_root: Path | str = DEFAULT_CATALOG_ROOT, cache_path: Path
                 "cache_path": str(app.state.scanner.cache_path),
                 "chart_payload": chart_payload,
                 "inventory_payload": inventory_payload,
+                "backtest_ready_count": backtest_ready_count,
+                "consumable_count": consumable_count,
+                "avg_readiness_score": avg_readiness_score,
             },
         )
 
@@ -249,7 +276,7 @@ def create_app(catalog_root: Path | str = DEFAULT_CATALOG_ROOT, cache_path: Path
         inventory = app.state.scanner.scan_inventory()
         instrument = next((item for item in inventory.instruments if item.instrument_id == instrument_id), None)
         if instrument is None:
-            raise HTTPException(status_code=404, detail=f"Instrument nem található: {instrument_id}")
+            raise HTTPException(status_code=404, detail=f"Instrument not found: {instrument_id}")
 
         audit = _load_audit(app)
         default_from_iso, default_to_iso = _default_instrument_range(audit, instrument_id)
@@ -257,6 +284,19 @@ def create_app(catalog_root: Path | str = DEFAULT_CATALOG_ROOT, cache_path: Path
             [item.model_dump(mode="json") for item in inventory.instruments],
             ensure_ascii=False,
         )
+
+        # Readiness info for this instrument
+        readiness = None
+        deltas_summary = None
+        try:
+            readiness = query_service.get_readiness(instrument_id)
+        except Exception:
+            pass
+        try:
+            deltas_summary = query_service.get_deltas_summary(instrument_id)
+        except Exception:
+            pass
+
         return TEMPLATES.TemplateResponse(
             request=request,
             name="instrument.html",
@@ -267,16 +307,22 @@ def create_app(catalog_root: Path | str = DEFAULT_CATALOG_ROOT, cache_path: Path
                 "default_from_iso": default_from_iso,
                 "default_to_iso": default_to_iso,
                 "inventory_payload": inventory_payload,
+                "readiness": readiness,
+                "deltas_summary": deltas_summary,
             },
         )
 
-    @app.get("/quality", response_class=HTMLResponse)
-    async def quality_page(request: Request) -> HTMLResponse:
+    @app.get("/quality", response_class=RedirectResponse)
+    async def quality_redirect() -> RedirectResponse:
+        return RedirectResponse(url="/readiness", status_code=301)
+
+    @app.get("/readiness", response_class=HTMLResponse)
+    async def readiness_page(request: Request) -> HTMLResponse:
         inventory = app.state.scanner.scan_inventory()
         audit = _load_audit(app)
         sorted_instruments = sorted(
             audit.instruments if audit else [],
-            key=lambda item: (item.quality_score, -(item.quality_snapshot_count or 0)),
+            key=lambda item: (item.readiness.readiness_score, -(item.readiness.delta_row_count or 0)),
         )
         return TEMPLATES.TemplateResponse(
             request=request,
@@ -288,6 +334,8 @@ def create_app(catalog_root: Path | str = DEFAULT_CATALOG_ROOT, cache_path: Path
                 "progress": app.state.runtime.progress,
             },
         )
+
+    # ── JSON API endpoints ──────────────────────────────────────────────────────────────────
 
     @app.get("/api/inventory", response_model=InventoryResponse)
     async def inventory_api(search: str | None = None) -> InventoryResponse:
@@ -331,6 +379,41 @@ def create_app(catalog_root: Path | str = DEFAULT_CATALOG_ROOT, cache_path: Path
                 bucket_s=bucket_s,
                 max_points=max_points,
             )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/deltas", response_model=DeltasResponse)
+    async def deltas_api(
+        instrument_id: str,
+        from_value: str | None = Query(None, alias="from"),
+        to_value: str | None = Query(None, alias="to"),
+        mode: Literal["raw", "agg"] = "raw",
+        bucket_s: int = 60,
+        max_points: int = 10_000,
+    ) -> DeltasResponse:
+        try:
+            return app.state.query_service.get_deltas(
+                instrument_id,
+                from_value=from_value,
+                to_value=to_value,
+                mode=mode,
+                bucket_s=bucket_s,
+                max_points=max_points,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/deltas/summary", response_model=DeltasSummaryResponse)
+    async def deltas_summary_api(instrument_id: str) -> DeltasSummaryResponse:
+        try:
+            return app.state.query_service.get_deltas_summary(instrument_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/readiness", response_model=ReadinessResponse)
+    async def readiness_api(instrument_id: str) -> ReadinessResponse:
+        try:
+            return app.state.query_service.get_readiness(instrument_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -392,7 +475,7 @@ def create_app(catalog_root: Path | str = DEFAULT_CATALOG_ROOT, cache_path: Path
     @app.get("/api/export")
     async def export_api(
         instrument_id: str,
-        kind: Literal["trades", "l2", "bundle"],
+        kind: Literal["trades", "l2", "deltas", "bundle"],
         from_value: str | None = Query(None, alias="from"),
         to_value: str | None = Query(None, alias="to"),
     ) -> StreamingResponse:
@@ -413,7 +496,19 @@ def create_app(catalog_root: Path | str = DEFAULT_CATALOG_ROOT, cache_path: Path
                 )
                 filename = f"{instrument_id}_l2.csv"
                 media_type = "text/csv; charset=utf-8"
+            elif kind == "deltas":
+                deltas_resp = app.state.query_service.get_deltas(
+                    instrument_id,
+                    from_value=from_value,
+                    to_value=to_value,
+                    mode="raw",
+                    max_points=50_000,
+                )
+                content = json.dumps(deltas_resp.model_dump(mode="json"), ensure_ascii=False, indent=2).encode("utf-8")
+                filename = f"{instrument_id}_deltas.json"
+                media_type = "application/json; charset=utf-8"
             else:
+                # bundle
                 content = app.state.query_service.export_bundle_json(
                     instrument_id,
                     from_value=from_value,
@@ -434,7 +529,7 @@ def create_app(catalog_root: Path | str = DEFAULT_CATALOG_ROOT, cache_path: Path
     async def audit_api() -> AuditResponse:
         audit = _load_audit(app)
         if audit is None:
-            raise HTTPException(status_code=404, detail="Még nincs audit cache.")
+            raise HTTPException(status_code=404, detail="No audit cache available yet.")
         return audit
 
     @app.get("/api/progress", response_model=ProgressResponse)
@@ -454,7 +549,7 @@ def create_app(catalog_root: Path | str = DEFAULT_CATALOG_ROOT, cache_path: Path
                 current_runtime,
                 status="running",
                 phase="queued",
-                message="Audit indítása...",
+                message="Starting audit...",
                 completed_steps=0,
                 total_steps=0,
                 started_at=started_at,
