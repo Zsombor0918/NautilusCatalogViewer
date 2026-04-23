@@ -25,6 +25,7 @@ from .models import (
     L2TimeseriesResponse,
     ProgressResponse,
     ReadinessResponse,
+    ReadinessResult,
     TradesResponse,
 )
 from .query import CatalogQueryService
@@ -32,9 +33,11 @@ from .query import CatalogQueryService
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CATALOG_ROOT = Path(
-    os.getenv("NAUTILUS_CATALOG_ROOT", "/home/zsom/services/nautilus_data/catalog"),
+    os.getenv("NAUTILUS_CATALOG_ROOT", "/home/z0055upd/Project/nautilus_data/catalog"),
 ).expanduser()
 DEFAULT_CACHE_PATH = PROJECT_ROOT / "state" / "web_audit_cache.json"
+_converter_env = os.getenv("NAUTILUS_CONVERTER_REPORTS_DIR")
+DEFAULT_CONVERTER_REPORTS_DIR: Path | None = Path(_converter_env).expanduser() if _converter_env else None
 TEMPLATES = Jinja2Templates(directory=str(PROJECT_ROOT / "templates"))
 
 
@@ -215,9 +218,13 @@ def _run_audit_worker(app: FastAPI, started_at: str) -> None:
 # ── Application factory ──────────────────────────────────────────────────────────────────────
 
 
-def create_app(catalog_root: Path | str = DEFAULT_CATALOG_ROOT, cache_path: Path | str = DEFAULT_CACHE_PATH) -> FastAPI:
+def create_app(
+    catalog_root: Path | str = DEFAULT_CATALOG_ROOT,
+    cache_path: Path | str = DEFAULT_CACHE_PATH,
+    converter_reports_dir: Path | str | None = DEFAULT_CONVERTER_REPORTS_DIR,
+) -> FastAPI:
     app = FastAPI(title="Nautilus Catalog Viewer", version="0.3.0", docs_url="/docs", redoc_url="/redoc")
-    scanner = CatalogScanner(catalog_root=catalog_root, cache_path=cache_path)
+    scanner = CatalogScanner(catalog_root=catalog_root, cache_path=cache_path, converter_reports_dir=converter_reports_dir)
     query_service: CatalogQueryService = scanner.query_service
     runtime = RuntimeState()
     runtime.latest_audit = scanner.load_audit_cache()
@@ -286,10 +293,17 @@ def create_app(catalog_root: Path | str = DEFAULT_CATALOG_ROOT, cache_path: Path
         )
 
         # Readiness info for this instrument
-        readiness = None
-        deltas_summary = None
+        readiness: ReadinessResult = ReadinessResult(
+            instrument_id=instrument_id,
+            instrument_type=instrument.instrument_type,
+        )
+        deltas_summary = DeltasSummaryResponse(
+            instrument_id=instrument_id,
+            instrument_type=instrument.instrument_type,
+            generated_at=_utc_now_iso(),
+        )
         try:
-            readiness = query_service.get_readiness(instrument_id)
+            readiness = query_service.get_readiness(instrument_id).readiness
         except Exception:
             pass
         try:

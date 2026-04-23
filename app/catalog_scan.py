@@ -123,6 +123,55 @@ def compute_readiness_score(
     return round(max(0.0, min(100.0, score)), 2)
 
 
+def _converter_key_to_instrument_id(key: str) -> str:
+    """Map 'BINANCE_SPOT/AAVEUSDT' -> 'AAVEUSDT.BINANCE' and 'BINANCE_USDTF/AAVEUSDT' -> 'AAVEUSDT-PERP.BINANCE'."""
+    parts = key.split("/", 1)
+    if len(parts) != 2:
+        return key
+    venue, symbol = parts
+    exchange = venue.split("_")[0]  # e.g. BINANCE from BINANCE_SPOT
+    is_perp = any(tag in venue for tag in ("USDTF", "PERP", "FUTURES", "SWAP"))
+    return f"{symbol}-PERP.{exchange}" if is_perp else f"{symbol}.{exchange}"
+
+
+def _load_converter_report(converter_reports_dir: Path) -> dict:
+    """Load the latest YYYY-MM-DD.json from the converter reports directory.
+
+    Returns the parsed JSON dict or an empty dict if none found.
+    """
+    if not converter_reports_dir.exists():
+        return {}
+    json_files = sorted(converter_reports_dir.glob("*.json"))
+    if not json_files:
+        return {}
+    latest = json_files[-1]  # alphabetical == date order
+    try:
+        return json.loads(latest.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _build_converter_fenced_map(converter_report: dict) -> dict[str, dict]:
+    """Build instrument_id -> {count, by_reason, examples} from the converter report.
+
+    Returns an empty dict when the report data has no per_symbol_fenced_ranges.
+    """
+    raw = converter_report.get("per_symbol_fenced_ranges", {})
+    result: dict[str, dict] = {}
+    for key, value in raw.items():
+        instrument_id = _converter_key_to_instrument_id(key)
+        count = int(value.get("fenced_ranges", 0))
+        by_reason: dict[str, int] = {}
+        for example in value.get("examples", []):
+            reason = str(example.get("reason", "unknown"))
+            by_reason[reason] = by_reason.get(reason, 0) + 1
+        result[instrument_id] = {
+            "count": count,
+            "by_reason": by_reason,
+        }
+    return result
+
+
 def _load_report_context(report_dir: Path, instrument_id: str) -> ReportContext:
     report_path = report_dir / f"{instrument_id}.json"
     if not report_path.exists():
@@ -173,11 +222,25 @@ def _load_report_context(report_dir: Path, instrument_id: str) -> ReportContext:
 
 
 class CatalogScanner:
-    def __init__(self, catalog_root: Path | str, cache_path: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        catalog_root: Path | str,
+        cache_path: Path | str | None = None,
+        converter_reports_dir: Path | str | None = None,
+    ) -> None:
         self.catalog_root = Path(catalog_root).expanduser().resolve()
         project_root = Path(__file__).resolve().parent.parent
         default_cache = project_root / "state" / "web_audit_cache.json"
         self.cache_path = Path(cache_path).expanduser().resolve() if cache_path else default_cache
+        # Converter reports directory: explicit arg > env var > None
+        import os as _os
+        _env = _os.getenv("NAUTILUS_CONVERTER_REPORTS_DIR")
+        if converter_reports_dir is not None:
+            self.converter_reports_dir: Path | None = Path(converter_reports_dir).expanduser().resolve()
+        elif _env:
+            self.converter_reports_dir = Path(_env).expanduser().resolve()
+        else:
+            self.converter_reports_dir = None
         self._nautilus_catalog: Any | None = None
         self._nautilus_catalog_initialized = False
         self.query_service = CatalogQueryService(self.catalog_root)
@@ -394,24 +457,71 @@ class CatalogScanner:
         except Exception as exc:
             return L2CheckResult(present=True, error=f"L2 sanity check failed: {exc}")
 
-    def _compute_readiness(self, instrument_id: str, instrument_type: str, data_type_results: dict[str, DataTypeAuditStats], report: ReportContext) -> ReadinessResult:
+    def _compute_readiness(
+        self,
+        instrument_id: str,
+        instrument_type: str,
+        data_type_results: dict[str, DataTypeAuditStats],
+        report: ReportContext,
+        converter_fenced: dict | None = None,
+    ) -> ReadinessResult:
         ts = data_type_results.get("trade_tick", DataTypeAuditStats(data_type="trade_tick"))
         ds = data_type_results.get("order_book_deltas", DataTypeAuditStats(data_type="order_book_deltas"))
         dps = data_type_results.get("order_book_depths", DataTypeAuditStats(data_type="order_book_depths"))
         ht, hd, hdp = ts.present, ds.present, dps.present
         dfo = hd and not hdp
         sbc = max(ts.session_break_count, ds.session_break_count)
+
+        # Fenced ranges: prefer converter report over per-instrument report file
+        if converter_fenced is not None:
+            fenced_count = converter_fenced["count"]
+            fenced_by_reason: dict[str, int] = converter_fenced["by_reason"]
+            converter_report_found = True
+        elif report.report_found:
+            fenced_count = len(report.fenced_ranges)
+            fenced_by_reason = {}
+            for fr in report.fenced_ranges:
+                r = fr.reason or "unknown"
+                fenced_by_reason[r] = fenced_by_reason.get(r, 0) + 1
+            converter_report_found = True
+        else:
+            fenced_count = 0
+            fenced_by_reason = {}
+            converter_report_found = False
+
         lims: list[str] = []
         if not ht: lims.append("No trade_tick data")
         if not hd: lims.append("No order_book_deltas data")
         if not hdp: lims.append("No optional order_book_depths (depth10)")
-        if report.fenced_ranges: lims.append(f"{len(report.fenced_ranges)} fenced range(s)")
+        if not converter_report_found: lims.append("Converter diagnostics missing")
+        if fenced_count > 0: lims.append(f"{fenced_count} fenced range(s)")
         if report.desync_count > 0: lims.append(f"{report.desync_count} desync event(s)")
         if report.resync_count > 5: lims.append(f"High resync count ({report.resync_count})")
         ic = ht or hd
         ibr = ht and hd and report.desync_count == 0
-        rs = compute_readiness_score(has_trade_tick=ht, has_order_book_deltas=hd, has_order_book_depths=hdp, trade_row_count=ts.row_count_estimate, delta_row_count=ds.row_count_estimate, trade_max_gap_seconds=ts.max_gap_seconds, delta_max_gap_seconds=ds.max_gap_seconds, fenced_range_count=len(report.fenced_ranges), desync_count=report.desync_count, resync_count=report.resync_count, session_break_count=sbc)
-        return ReadinessResult(instrument_id=instrument_id, instrument_type=instrument_type, has_trade_tick=ht, has_order_book_deltas=hd, has_order_book_depths=hdp, delta_first_only=dfo, is_consumable=ic, is_backtest_ready=ibr, trade_row_count=ts.row_count_estimate, delta_row_count=ds.row_count_estimate, depth_row_count=dps.row_count_estimate, trade_duration_seconds=ts.duration_seconds, delta_duration_seconds=ds.duration_seconds, trade_max_gap_seconds=ts.max_gap_seconds, delta_max_gap_seconds=ds.max_gap_seconds, session_break_count=sbc, fenced_range_count=len(report.fenced_ranges), resync_count=report.resync_count, desync_count=report.desync_count, snapshot_seed_count=report.snapshot_seed_count, readiness_score=rs, limitations=lims, report=report)
+        # Slight penalty when converter diagnostics are missing
+        missing_report_penalty = 0 if converter_report_found else 5
+        rs = max(0.0, compute_readiness_score(
+            has_trade_tick=ht, has_order_book_deltas=hd, has_order_book_depths=hdp,
+            trade_row_count=ts.row_count_estimate, delta_row_count=ds.row_count_estimate,
+            trade_max_gap_seconds=ts.max_gap_seconds, delta_max_gap_seconds=ds.max_gap_seconds,
+            fenced_range_count=fenced_count, desync_count=report.desync_count,
+            resync_count=report.resync_count, session_break_count=sbc,
+        ) - missing_report_penalty)
+        return ReadinessResult(
+            instrument_id=instrument_id, instrument_type=instrument_type,
+            has_trade_tick=ht, has_order_book_deltas=hd, has_order_book_depths=hdp,
+            delta_first_only=dfo, is_consumable=ic, is_backtest_ready=ibr,
+            trade_row_count=ts.row_count_estimate, delta_row_count=ds.row_count_estimate,
+            depth_row_count=dps.row_count_estimate, trade_duration_seconds=ts.duration_seconds,
+            delta_duration_seconds=ds.duration_seconds, trade_max_gap_seconds=ts.max_gap_seconds,
+            delta_max_gap_seconds=ds.max_gap_seconds, session_break_count=sbc,
+            fenced_range_count=fenced_count, fenced_ranges_by_reason=fenced_by_reason,
+            converter_report_found=converter_report_found,
+            resync_count=report.resync_count, desync_count=report.desync_count,
+            snapshot_seed_count=report.snapshot_seed_count,
+            readiness_score=rs, limitations=lims, report=report,
+        )
 
     def _build_summary(self, instrument_results: list[AuditInstrumentResult]) -> AuditSummary:
         dtc = {dt: 0 for dt in EVENT_DATA_TYPES}
@@ -462,6 +572,13 @@ class CatalogScanner:
         instrument_index, event_maps, warnings = self._collect_catalog_state()
         inventory = self.scan_inventory()
         iids = [i.instrument_id for i in inventory.instruments]
+        # Load converter report and build per-instrument fenced range map
+        converter_raw = _load_converter_report(self.converter_reports_dir) if self.converter_reports_dir else {}
+        converter_fenced_map = _build_converter_fenced_map(converter_raw) if converter_raw else {}
+        if converter_raw and not converter_fenced_map:
+            warnings.append(self._warning("converter_report_empty", "Converter report found but per_symbol_fenced_ranges is empty."))
+        if self.converter_reports_dir and not converter_raw:
+            warnings.append(self._warning("converter_report_missing", f"No converter reports found in {self.converter_reports_dir}", self.converter_reports_dir))
         total_steps = sum(1 for iid in iids for dt in EVENT_DATA_TYPES if event_maps[dt].get(iid))
         total_steps += sum(1 for iid in iids if event_maps.get("order_book_depths", {}).get(iid))
         total_steps = max(total_steps, 1)
@@ -479,7 +596,8 @@ class CatalogScanner:
                     cs += 1
                     if progress_callback: progress_callback("scan", cs, total_steps, f"{iid} / {dt} done.")
             report = _load_report_context(self.report_dir, iid)
-            readiness = self._compute_readiness(iid, itype, dtr, report)
+            converter_fenced = converter_fenced_map.get(iid)
+            readiness = self._compute_readiness(iid, itype, dtr, report, converter_fenced=converter_fenced)
             df = event_maps.get("order_book_depths", {}).get(iid, [])
             if df and progress_callback: progress_callback("l2", cs, total_steps, f"{iid} L2 sanity check running...")
             l2r = self._run_l2_check(iid, first_n=first_n, random_n=random_n, instrument_type=itype, warnings=warnings) if df else L2CheckResult(present=False)

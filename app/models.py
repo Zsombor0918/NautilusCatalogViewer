@@ -136,6 +136,8 @@ class ReadinessResult(StrictModel):
     session_break_count: int = 0
     # Report context
     fenced_range_count: int = 0
+    fenced_ranges_by_reason: dict[str, int] = Field(default_factory=dict)
+    converter_report_found: bool = False
     resync_count: int = 0
     desync_count: int = 0
     snapshot_seed_count: int = 0

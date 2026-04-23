@@ -6,7 +6,7 @@ from pathlib import Path
 import uvicorn
 
 from .catalog_scan import CatalogScanner
-from .main import DEFAULT_CACHE_PATH, DEFAULT_CATALOG_ROOT, create_app
+from .main import DEFAULT_CACHE_PATH, DEFAULT_CATALOG_ROOT, DEFAULT_CONVERTER_REPORTS_DIR, create_app
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,10 +21,14 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--port", type=int, default=8000)
     serve_parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_ROOT)
     serve_parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE_PATH)
+    serve_parser.add_argument("--converter-reports", type=Path, default=DEFAULT_CONVERTER_REPORTS_DIR, dest="converter_reports",
+                              help="Path to converter reports directory (contains YYYY-MM-DD.json files).")
 
     audit_parser = subparsers.add_parser("audit", help="Run CLI audit.")
     audit_parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_ROOT)
     audit_parser.add_argument("--out", type=Path, default=Path("state/audit.json"))
+    audit_parser.add_argument("--converter-reports", type=Path, default=DEFAULT_CONVERTER_REPORTS_DIR, dest="converter_reports",
+                              help="Path to converter reports directory (contains YYYY-MM-DD.json files).")
     audit_parser.add_argument(
         "--first-n", type=int, default=10,
         help="Sample first N depth snapshots.",
@@ -38,13 +42,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def serve_command(args: argparse.Namespace) -> int:
-    app = create_app(catalog_root=args.catalog, cache_path=args.cache)
+    app = create_app(catalog_root=args.catalog, cache_path=args.cache, converter_reports_dir=args.converter_reports)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
 
 
 def audit_command(args: argparse.Namespace) -> int:
-    scanner = CatalogScanner(catalog_root=args.catalog, cache_path=args.out)
+    scanner = CatalogScanner(catalog_root=args.catalog, cache_path=args.out, converter_reports_dir=args.converter_reports)
     audit = scanner.run_audit(
         cache_path=args.out,
         first_n=args.first_n,
