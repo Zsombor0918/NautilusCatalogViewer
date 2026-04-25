@@ -12,6 +12,7 @@ import pandas as pd
 import pyarrow.dataset as ds
 
 from .cache import QueryCache, build_cache_key, compute_files_signature
+from .scoring import compute_readiness_breakdown, compute_readiness_score
 from .l2_checks import (
     DEPTH_LEVELS,
     compute_gap_entries,
@@ -750,32 +751,34 @@ class CatalogQueryService:
             cov = self._coverage_for_type(data_type="order_book_depths", instrument_id=instrument_id, from_ns=None, to_ns=None)
             depth_row_count = cov.row_count
 
-        # Compute readiness
+        # Compute readiness using the same formula as catalog_scan.compute_readiness_score
         limitations: list[str] = []
         if not has_trade:
             limitations.append("No trade_tick data")
         if not has_deltas:
             limitations.append("No order_book_deltas data")
         if not has_depths:
-            limitations.append("No order_book_depths data (optional)")
+            limitations.append("No optional order_book_depths (depth10)")
 
-        is_consumable = has_trade and has_deltas
-        is_backtest_ready = is_consumable and trade_row_count > 0 and delta_row_count > 0
+        is_consumable = has_trade or has_deltas
+        is_backtest_ready = has_trade and has_deltas and delta_row_count > 0
 
-        # Readiness score: 0-100
-        score = 0.0
-        if has_trade:
-            score += 30.0
-        if has_deltas:
-            score += 40.0
-        if has_depths:
-            score += 10.0
-        if is_backtest_ready:
-            score += 20.0
-        # Penalise large gaps
-        if delta_max_gap is not None and delta_max_gap > 300:
-            score = max(0.0, score - min(20.0, delta_max_gap / 60.0))
-        score = round(min(100.0, max(0.0, score)), 1)
+        # Note: fenced_range_count / desync_count / resync_count are not available
+        # without loading per-instrument report files. Pass 0 so the live-API score
+        # is consistent with the audit formula (which does penalise when those exist).
+        score, breakdown = compute_readiness_breakdown(
+            has_trade_tick=has_trade,
+            has_order_book_deltas=has_deltas,
+            has_order_book_depths=has_depths,
+            trade_row_count=trade_row_count,
+            delta_row_count=delta_row_count,
+            trade_max_gap_seconds=trade_max_gap,
+            delta_max_gap_seconds=delta_max_gap,
+            fenced_range_count=0,
+            desync_count=0,
+            resync_count=0,
+            session_break_count=session_break_count,
+        )
 
         result = ReadinessResult(
             instrument_id=instrument_id,
@@ -795,6 +798,7 @@ class CatalogQueryService:
             delta_max_gap_seconds=delta_max_gap,
             session_break_count=session_break_count,
             readiness_score=score,
+            score_breakdown=breakdown,
             limitations=limitations,
         )
 

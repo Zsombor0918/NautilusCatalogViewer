@@ -112,6 +112,14 @@ class InventoryResponse(StrictModel):
 
 # ── Readiness model (deterministic-first) ──────────────────────────────────
 
+class ScoreComponent(StrictModel):
+    """One positive or negative contributor to the readiness score."""
+    label: str
+    points: float
+    detail: str = ""
+    positive: bool = True  # True = bonus, False = penalty
+
+
 class ReadinessResult(StrictModel):
     """Per-instrument deterministic readiness assessment."""
     instrument_id: str = ""
@@ -143,6 +151,7 @@ class ReadinessResult(StrictModel):
     snapshot_seed_count: int = 0
     # Readiness score (0-100, deterministic-first)
     readiness_score: float = 0.0
+    score_breakdown: list[ScoreComponent] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     report: ReportContext = Field(default_factory=ReportContext)
 
@@ -292,6 +301,11 @@ class AuditSummary(StrictModel):
     chart_points: list[ChartPoint] = Field(default_factory=list)
     top_crossed_offenders: list[QualityOffenderItem] = Field(default_factory=list)
     top_empty_offenders: list[QualityOffenderItem] = Field(default_factory=list)
+    # Converter trade-tick cross-check (populated when converter report is available)
+    converter_trade_tick_instrument_count: int | None = None
+    viewer_trade_tick_instrument_count: int | None = None
+    trade_tick_detected_mismatch: bool = False
+    trade_tick_no_data_list: list[str] = Field(default_factory=list)  # instruments converter says have no trade data
 
 
 class AuditResponse(StrictModel):

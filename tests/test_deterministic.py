@@ -508,8 +508,8 @@ def test_export_bundle_delta_first(catalog_with_deltas_only: Path):
     assert "trades" in bundle
     assert "deltas_summary" in bundle
     assert "readiness" in bundle
-    assert bundle["readiness"]["has_order_book_deltas"] is True
-    assert bundle["readiness"]["has_order_book_depths"] is False
+    assert bundle["readiness"]["readiness"]["has_order_book_deltas"] is True
+    assert bundle["readiness"]["readiness"]["has_order_book_depths"] is False
 
 
 # ── Tests: Model backward compat ──────────────────────────────────────────

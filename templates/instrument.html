@@ -148,7 +148,7 @@
     <div class="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
       <div class="rounded-2xl bg-mist px-4 py-3">
         <div class="text-xs uppercase tracking-[0.18em] text-slate-500">readiness score</div>
-        <div class="mt-2 text-2xl font-bold text-ink">{{ readiness.readiness_score|round(1) }}</div>
+        <div class="mt-2 text-2xl font-bold text-ink">{{ readiness.readiness_score|round(1) }}<span class="ml-1 text-sm font-normal text-slate-400">/ 100</span></div>
       </div>
       <div class="rounded-2xl bg-mist px-4 py-3">
         <div class="text-xs uppercase tracking-[0.18em] text-slate-500">is_backtest_ready</div>
@@ -195,6 +195,74 @@
         <div class="mt-2 text-sm font-semibold text-ink">{{ readiness.snapshot_seed_count }}</div>
       </div>
     </div>
+
+    {# ── Score breakdown ──────────────────────────────────────────────────── #}
+    {% if readiness.score_breakdown %}
+    <div class="mt-6">
+      <h3 class="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Score breakdown</h3>
+
+      {# Simple score bar: green = final score, red = applied penalties, grey = unused #}
+      {% set score_pct = readiness.readiness_score %}
+      {% set penalty_pct = namespace(v=0) %}
+      {% for comp in readiness.score_breakdown %}{% if not comp.positive %}{% set penalty_pct.v = penalty_pct.v + (comp.points | abs) %}{% endif %}{% endfor %}
+      {% set penalty_vis = [penalty_pct.v, 100 - score_pct] | min %}
+
+      <div class="mb-1 flex items-center gap-3">
+        <div class="flex h-7 flex-1 overflow-hidden rounded-full bg-slate-100 text-xs font-bold">
+          <div class="flex items-center justify-center bg-emerald-400 text-white drop-shadow transition-all"
+               style="width:{{ score_pct }}%"
+               title="Final score: {{ score_pct }}">
+            {% if score_pct > 10 %}<span class="px-2">{{ score_pct | int }}</span>{% endif %}
+          </div>
+          {% if penalty_vis > 0 %}
+          <div class="flex items-center justify-center bg-rose-400 text-white drop-shadow transition-all"
+               style="width:{{ penalty_vis }}%"
+               title="Total penalties: −{{ penalty_pct.v | round(1) }}">
+            {% if penalty_vis > 5 %}<span class="px-1">−{{ penalty_pct.v | round(1) | int }}</span>{% endif %}
+          </div>
+          {% endif %}
+        </div>
+        <span class="shrink-0 text-sm font-bold text-ink">{{ score_pct }} / 100</span>
+      </div>
+      <div class="mb-4 flex gap-4 text-xs text-slate-500">
+        <span><span class="inline-block h-3 w-3 rounded-full bg-emerald-400 align-middle"></span> bonus</span>
+        <span><span class="inline-block h-3 w-3 rounded-full bg-rose-400 align-middle"></span> penalty</span>
+        <span><span class="inline-block h-3 w-3 rounded-full bg-slate-200 align-middle"></span> unused headroom</span>
+      </div>
+
+      {# Row table #}
+      <div class="overflow-x-auto">
+        <table class="w-full border-separate border-spacing-y-1 text-sm">
+          <thead>
+            <tr class="text-left text-xs uppercase tracking-[0.18em] text-slate-400">
+              <th class="px-3 py-1">Component</th>
+              <th class="px-3 py-1 text-right">Points</th>
+              <th class="px-3 py-1">Detail</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for comp in readiness.score_breakdown %}
+            <tr class="{% if comp.positive %}bg-emerald-50{% else %}bg-rose-50{% endif %}">
+              <td class="rounded-l-xl px-3 py-2 font-medium {% if comp.positive %}text-emerald-800{% else %}text-rose-800{% endif %}">
+                {% if comp.positive %}&#43;{% endif %}{{ comp.label }}
+              </td>
+              <td class="px-3 py-2 text-right font-bold tabular-nums {% if comp.positive %}text-emerald-700{% else %}text-rose-700{% endif %}">
+                {% if comp.positive %}+{% endif %}{{ "%.2f" | format(comp.points) }}
+              </td>
+              <td class="rounded-r-xl px-3 py-2 text-slate-500">{{ comp.detail }}</td>
+            </tr>
+            {% endfor %}
+            <tr class="bg-slate-100">
+              <td class="rounded-l-xl px-3 py-2 font-bold text-ink">Total (capped 0 – 100)</td>
+              <td class="px-3 py-2 text-right font-bold tabular-nums text-ink">{{ "%.2f" | format(readiness.readiness_score) }}</td>
+              <td class="rounded-r-xl px-3 py-2 text-xs text-slate-400"></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endif %}
+
     {% if readiness.limitations %}
     <div class="mt-4">
       <h3 class="mb-2 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Limitations</h3>

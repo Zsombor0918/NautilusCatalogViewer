@@ -150,12 +150,23 @@
           </td>
           <td class="px-4 py-4 text-slate-600">{{ item.instrument_type }}</td>
           <td class="px-4 py-4">
-            {% if item.readiness.readiness_score >= 80 %}
-            <span class="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-sm font-semibold text-emerald-700">{{ item.readiness.readiness_score|format_float }}</span>
-            {% elif item.readiness.readiness_score >= 50 %}
-            <span class="inline-flex items-center rounded-full bg-amber-50 px-3 py-1 text-sm font-semibold text-amber-700">{{ item.readiness.readiness_score|format_float }}</span>
+            {% if item.readiness.score_breakdown %}
+            {% set tip = namespace(v="") %}
+            {% for comp in item.readiness.score_breakdown %}{% set tip.v = tip.v + comp.label + ": " + ("+" if comp.positive else "") + ("%.2f" | format(comp.points)) + (" (" + comp.detail + ")" if comp.detail else "") + "&#10;" %}{% endfor %}
             {% else %}
-            <span class="inline-flex items-center rounded-full bg-red-50 px-3 py-1 text-sm font-semibold text-red-700">{{ item.readiness.readiness_score|format_float }}</span>
+            {% set tip = namespace(v="") %}
+            {% endif %}
+            <span title="{{ tip.v }}"
+                  class="inline-flex cursor-help items-center rounded-full px-3 py-1 text-sm font-semibold
+                  {% if item.readiness.readiness_score >= 80 %}bg-emerald-50 text-emerald-700
+                  {% elif item.readiness.readiness_score >= 50 %}bg-amber-50 text-amber-700
+                  {% else %}bg-red-50 text-red-700{% endif %}">
+              {{ item.readiness.readiness_score|format_float }}
+            </span>
+            {% if item.readiness.score_breakdown %}
+            <div class="mt-1 text-xs tabular-nums">
+              {% for comp in item.readiness.score_breakdown %}{% if comp.positive %}<span class="text-emerald-600">+{{ comp.points | int }}</span>{% else %}<span class="text-rose-500">{{ comp.points | round(1) }}</span>{% endif %}{% if not loop.last %}<span class="text-slate-300"> · </span>{% endif %}{% endfor %}
+            </div>
             {% endif %}
           </td>
           <td class="px-4 py-4">

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import heapq
 import json
-import math
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -82,45 +81,7 @@ def _dedupe_warnings(warnings: list[CatalogWarning]) -> list[CatalogWarning]:
     return unique
 
 
-def compute_readiness_score(
-    *,
-    has_trade_tick: bool,
-    has_order_book_deltas: bool,
-    has_order_book_depths: bool,
-    trade_row_count: int,
-    delta_row_count: int,
-    trade_max_gap_seconds: float | None,
-    delta_max_gap_seconds: float | None,
-    fenced_range_count: int,
-    desync_count: int,
-    resync_count: int,
-    session_break_count: int,
-) -> float:
-    score = 0.0
-    if has_trade_tick:
-        score += 20.0
-    if has_order_book_deltas:
-        score += 25.0
-    if has_order_book_depths:
-        score += 5.0
-    if trade_row_count > 1000:
-        score += 10.0
-    elif trade_row_count > 0:
-        score += 5.0
-    if delta_row_count > 1000:
-        score += 10.0
-    elif delta_row_count > 0:
-        score += 5.0
-    gap_penalty = 0.0
-    for gap_sec in (trade_max_gap_seconds, delta_max_gap_seconds):
-        if gap_sec is not None and gap_sec > 0:
-            gap_penalty += min(7.5, math.log10(gap_sec + 1.0) * 2.5)
-    score -= gap_penalty
-    score -= min(10.0, fenced_range_count * 2.0)
-    score -= min(5.0, desync_count * 1.0)
-    score -= min(5.0, resync_count * 0.5)
-    score -= min(5.0, session_break_count * 0.5)
-    return round(max(0.0, min(100.0, score)), 2)
+from .scoring import compute_readiness_breakdown, compute_readiness_score
 
 
 def _converter_key_to_instrument_id(key: str) -> str:
@@ -149,6 +110,26 @@ def _load_converter_report(converter_reports_dir: Path) -> dict:
         return json.loads(latest.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def _build_converter_trade_presence(converter_report: dict) -> dict:
+    """Extract trade-presence summary from the converter report.
+
+    Returns a dict with:
+      - instruments_with_trades: int
+      - no_trade_instrument_ids: list[str]   (Nautilus-style IDs)
+    """
+    dp = converter_report.get("data_presence", {})
+    if not dp:
+        return {}
+    instrument_count = int(dp.get("instruments_with_trades", 0))
+    no_data_raw: list[str] = dp.get("no_data_list", [])
+    # no_data_list may contain Nautilus IDs already (e.g. UTKUSDT.BINANCE)
+    no_trade_ids = [str(x) for x in no_data_raw]
+    return {
+        "instruments_with_trades": instrument_count,
+        "no_trade_instrument_ids": no_trade_ids,
+    }
 
 
 def _build_converter_fenced_map(converter_report: dict) -> dict[str, dict]:
@@ -345,27 +326,59 @@ class CatalogScanner:
         ]
         return InventoryResponse(catalog_root=str(self.catalog_root), generated_at=_utc_now_iso(), available_data_types=list(EVENT_DATA_TYPES), instrument_types=instrument_types, instruments=instruments, warnings=warnings)
 
+    @staticmethod
+    def _resolve_ts_for_parquet(schema_names: list[str]) -> str:
+        """Return the best ts column name available in a parquet schema.
+
+        Prefers ``ts_event``, then ``event_ts``, then ``ts``, then any column
+        whose name contains ``ts_event``.  Raises ``KeyError`` when none found.
+        """
+        for candidate in ("ts_event", "event_ts", "ts"):
+            if candidate in schema_names:
+                return candidate
+        for name in schema_names:
+            if "ts_event" in name:
+                return name
+        raise KeyError(f"No ts_event-like column found in schema: {schema_names}")
+
     def _metadata_ts_bounds(self, parquet_file: pq.ParquetFile) -> tuple[int | None, int | None]:
         metadata = parquet_file.metadata
+        # Discover the ts column name from the first row-group's schema
+        schema_names: list[str] = []
+        if metadata.num_row_groups > 0:
+            rg0 = metadata.row_group(0)
+            schema_names = [rg0.column(ci).path_in_schema for ci in range(rg0.num_columns)]
+        try:
+            ts_col = self._resolve_ts_for_parquet(schema_names)
+        except KeyError:
+            return None, None
         min_ts: int | None = None
         max_ts: int | None = None
         for rgi in range(metadata.num_row_groups):
             rg = metadata.row_group(rgi)
             for ci in range(rg.num_columns):
                 col = rg.column(ci)
-                if col.path_in_schema != "ts_event" or col.statistics is None:
+                if col.path_in_schema != ts_col or col.statistics is None:
                     continue
                 stats = col.statistics
+                if not stats.has_min_max:
+                    continue
                 cmin, cmax = int(stats.min), int(stats.max)
                 min_ts = cmin if min_ts is None else min(min_ts, cmin)
                 max_ts = cmax if max_ts is None else max(max_ts, cmax)
         return min_ts, max_ts
 
     def _scan_ts_bounds_fallback(self, file_path: Path) -> tuple[int | None, int | None]:
-        table = pq.read_table(file_path, columns=["ts_event"])
+        # Read schema to find the ts column
+        pf_schema = pq.read_schema(file_path)
+        try:
+            ts_col = self._resolve_ts_for_parquet(pf_schema.names)
+        except KeyError:
+            return None, None
+        table = pq.read_table(file_path, columns=[ts_col])
         if table.num_rows == 0:
             return None, None
-        values = np.asarray(table.column("ts_event").combine_chunks().to_numpy(), dtype=np.int64)
+        values = np.asarray(table.column(ts_col).combine_chunks().to_numpy(), dtype=np.int64)
         if values.size == 0:
             return None, None
         return int(values.min()), int(values.max())
@@ -402,10 +415,17 @@ class CatalogScanner:
         all_ts: list[int] = []
         sbt_ns = 300 * 1_000_000_000
         sbc = 0
+        # Resolve ts column name from the first file
+        ts_col = "ts_event"
+        if files:
+            try:
+                ts_col = self._resolve_ts_for_parquet(pq.read_schema(files[0]).names)
+            except KeyError:
+                pass
         for fp in files:
             pf = pq.ParquetFile(fp)
             fl = _relative_file_label(self.catalog_root, fp)
-            for batch in pf.iter_batches(columns=["ts_event"], batch_size=65_536):
+            for batch in pf.iter_batches(columns=[ts_col], batch_size=65_536):
                 vals = np.asarray(batch.column(0).to_numpy(), dtype=np.int64)
                 if vals.size == 0:
                     continue
@@ -501,13 +521,22 @@ class CatalogScanner:
         ibr = ht and hd and report.desync_count == 0
         # Slight penalty when converter diagnostics are missing
         missing_report_penalty = 0 if converter_report_found else 5
-        rs = max(0.0, compute_readiness_score(
+        rs_raw, breakdown = compute_readiness_breakdown(
             has_trade_tick=ht, has_order_book_deltas=hd, has_order_book_depths=hdp,
             trade_row_count=ts.row_count_estimate, delta_row_count=ds.row_count_estimate,
             trade_max_gap_seconds=ts.max_gap_seconds, delta_max_gap_seconds=ds.max_gap_seconds,
             fenced_range_count=fenced_count, desync_count=report.desync_count,
             resync_count=report.resync_count, session_break_count=sbc,
-        ) - missing_report_penalty)
+        )
+        rs = max(0.0, rs_raw - missing_report_penalty)
+        if missing_report_penalty > 0:
+            from .models import ScoreComponent  # noqa: PLC0415
+            breakdown.append(ScoreComponent(
+                label="converter report missing",
+                points=-missing_report_penalty,
+                detail="per-instrument report file not found",
+                positive=False,
+            ))
         return ReadinessResult(
             instrument_id=instrument_id, instrument_type=instrument_type,
             has_trade_tick=ht, has_order_book_deltas=hd, has_order_book_depths=hdp,
@@ -520,10 +549,10 @@ class CatalogScanner:
             converter_report_found=converter_report_found,
             resync_count=report.resync_count, desync_count=report.desync_count,
             snapshot_seed_count=report.snapshot_seed_count,
-            readiness_score=rs, limitations=lims, report=report,
+            readiness_score=rs, score_breakdown=breakdown, limitations=lims, report=report,
         )
 
-    def _build_summary(self, instrument_results: list[AuditInstrumentResult]) -> AuditSummary:
+    def _build_summary(self, instrument_results: list[AuditInstrumentResult], *, converter_presence: dict | None = None) -> AuditSummary:
         dtc = {dt: 0 for dt in EVENT_DATA_TYPES}
         trc = {dt: 0 for dt in EVENT_DATA_TYPES}
         cps: list[ChartPoint] = []
@@ -566,7 +595,16 @@ class CatalogScanner:
         tco = [_qo(i) for i in sorted(instrument_results, key=lambda x: x.crossed_rate, reverse=True)[:10]]
         teo = [_qo(i) for i in sorted(instrument_results, key=lambda x: x.empty_rate, reverse=True)[:10]]
 
-        return AuditSummary(instrument_count=len(instrument_results), data_type_coverage=dtc, total_row_counts=trc, backtest_ready_count=brc, consumable_count=cc, avg_readiness_score=round(ars, 2), total_fenced_range_count=tfr, total_desync_count=tdc, total_resync_count=trsc, top_readiness_offenders=tro, top_gap_offenders=tgo, top_fenced_offenders=tfo, l2_sampled_snapshot_count=l2ss, l2_bad_count=l2bc, l2_bad_instrument_count=l2bi, l2_bad_rate=l2br, overall_crossed_rate=ocr, overall_empty_rate=oer, overall_monotonic_rate=omr, overall_quality_score=oqs, session_break_count=sbc, chart_points=cps, top_crossed_offenders=tco, top_empty_offenders=teo)
+        viewer_tt_count = dtc.get("trade_tick", 0)
+        converter_tt_count: int | None = None
+        tt_mismatch = False
+        tt_no_data_list: list[str] = []
+        if converter_presence:
+            converter_tt_count = converter_presence.get("instruments_with_trades")
+            tt_no_data_list = converter_presence.get("no_trade_instrument_ids", [])
+            if converter_tt_count is not None and converter_tt_count != viewer_tt_count:
+                tt_mismatch = True
+        return AuditSummary(instrument_count=len(instrument_results), data_type_coverage=dtc, total_row_counts=trc, backtest_ready_count=brc, consumable_count=cc, avg_readiness_score=round(ars, 2), total_fenced_range_count=tfr, total_desync_count=tdc, total_resync_count=trsc, top_readiness_offenders=tro, top_gap_offenders=tgo, top_fenced_offenders=tfo, l2_sampled_snapshot_count=l2ss, l2_bad_count=l2bc, l2_bad_instrument_count=l2bi, l2_bad_rate=l2br, overall_crossed_rate=ocr, overall_empty_rate=oer, overall_monotonic_rate=omr, overall_quality_score=oqs, session_break_count=sbc, chart_points=cps, top_crossed_offenders=tco, top_empty_offenders=teo, viewer_trade_tick_instrument_count=viewer_tt_count, converter_trade_tick_instrument_count=converter_tt_count, trade_tick_detected_mismatch=tt_mismatch, trade_tick_no_data_list=tt_no_data_list)
 
     def run_audit(self, *, cache_path: Path | str | None = None, first_n: int = 10, random_n: int = 10, progress_callback: ProgressCallback | None = None) -> AuditResponse:
         instrument_index, event_maps, warnings = self._collect_catalog_state()
@@ -575,6 +613,7 @@ class CatalogScanner:
         # Load converter report and build per-instrument fenced range map
         converter_raw = _load_converter_report(self.converter_reports_dir) if self.converter_reports_dir else {}
         converter_fenced_map = _build_converter_fenced_map(converter_raw) if converter_raw else {}
+        converter_trade_presence = _build_converter_trade_presence(converter_raw) if converter_raw else {}
         if converter_raw and not converter_fenced_map:
             warnings.append(self._warning("converter_report_empty", "Converter report found but per_symbol_fenced_ranges is empty."))
         if self.converter_reports_dir and not converter_raw:
@@ -621,11 +660,90 @@ class CatalogScanner:
                 max_gap_seconds=max(readiness.trade_max_gap_seconds or 0, readiness.delta_max_gap_seconds or 0) or None,
                 corrupt=any(s.corrupt for s in dtr.values()) or bool(fq.error if fq else False),
             ))
-        summary = self._build_summary(results)
+        summary = self._build_summary(results, converter_presence=converter_trade_presence if converter_trade_presence else None)
+        if summary.trade_tick_detected_mismatch:
+            warnings.append(self._warning(
+                "trade_tick_detected_mismatch",
+                f"trade_tick mismatch: converter reports {summary.converter_trade_tick_instrument_count} instruments with trades, "
+                f"viewer detected {summary.viewer_trade_tick_instrument_count}. "
+                f"Instruments with no data per converter: {summary.trade_tick_no_data_list}.",
+            ))
         tc = Path(cache_path).expanduser().resolve() if cache_path else self.cache_path
         audit = AuditResponse(catalog_root=str(self.catalog_root), generated_at=_utc_now_iso(), cache_path=str(tc), inventory=inventory, instruments=results, summary=summary, warnings=_dedupe_warnings(warnings + inventory.warnings))
         self.save_audit_cache(audit, tc)
         return audit
+
+    def debug_trade_tick(self) -> dict:
+        """Return a diagnostic snapshot of the TradeTick data found in the catalog.
+
+        Includes:
+        - discovered dataset paths
+        - number of parquet files per instrument
+        - sample schema (first file of first instrument)
+        - first 5 instrument IDs found
+        - whether any futures/perpetual instrument IDs are present
+        """
+        trade_tick_dir = self.data_root / "trade_tick"
+        result: dict = {
+            "trade_tick_dir": str(trade_tick_dir),
+            "trade_tick_dir_exists": trade_tick_dir.exists(),
+            "instrument_count": 0,
+            "total_parquet_files": 0,
+            "instruments": [],
+            "sample_schema": None,
+            "futures_instruments_found": [],
+            "spot_instruments_found": [],
+        }
+        if not trade_tick_dir.exists():
+            result["error"] = f"Directory not found: {trade_tick_dir}"
+            return result
+
+        instruments: list[dict] = []
+        for instrument_dir in sorted(trade_tick_dir.iterdir()):
+            if not instrument_dir.is_dir():
+                continue
+            parquet_files = sorted(instrument_dir.glob("*.parquet"))
+            file_count = len(parquet_files)
+            if file_count == 0:
+                continue
+            entry: dict = {
+                "instrument_id": instrument_dir.name,
+                "file_count": file_count,
+                "files": [str(p) for p in parquet_files[:3]],
+                "schema": None,
+                "row_count": None,
+                "ts_event_min_ns": None,
+                "ts_event_max_ns": None,
+                "error": None,
+            }
+            try:
+                schema = pq.read_schema(parquet_files[0])
+                entry["schema"] = schema.names
+                pf = pq.ParquetFile(parquet_files[0])
+                entry["row_count"] = pf.metadata.num_rows
+                fmin, fmax = self._metadata_ts_bounds(pf)
+                if fmin is None or fmax is None:
+                    fmin, fmax = self._scan_ts_bounds_fallback(parquet_files[0])
+                entry["ts_event_min_ns"] = fmin
+                entry["ts_event_max_ns"] = fmax
+            except Exception as exc:
+                entry["error"] = str(exc)
+            instruments.append(entry)
+
+        result["instrument_count"] = len(instruments)
+        result["total_parquet_files"] = sum(e["file_count"] for e in instruments)
+        result["instruments"] = instruments[:5]  # first 5 for debug output
+
+        if instruments:
+            result["sample_schema"] = instruments[0].get("schema")
+
+        result["futures_instruments_found"] = [
+            e["instrument_id"] for e in instruments if "-PERP." in e["instrument_id"] or "-SWAP." in e["instrument_id"]
+        ]
+        result["spot_instruments_found"] = [
+            e["instrument_id"] for e in instruments if "-PERP." not in e["instrument_id"] and "-SWAP." not in e["instrument_id"]
+        ]
+        return result
 
     def save_audit_cache(self, audit: AuditResponse, cache_path: Path | str | None = None) -> Path:
         target = Path(cache_path).expanduser().resolve() if cache_path else self.cache_path
