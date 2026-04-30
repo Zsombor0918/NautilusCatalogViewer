@@ -12,7 +12,7 @@
           Deterministic Catalog Explorer &amp; Audit Tool
         </h1>
         <p class="mt-4 max-w-3xl text-lg text-slate-600">
-          Inventory, trade/delta coverage, deterministic readiness and replay integrity &mdash; all in one place.
+          Inventory, trade/delta coverage, backtest readiness, L2 reliability and audit confidence &mdash; all in one place.
         </p>
         <div class="mt-6 flex flex-wrap gap-3 text-sm text-slate-600">
           <span class="rounded-full bg-mist px-4 py-2">Catalog: {{ inventory.catalog_root }}</span>
@@ -83,14 +83,32 @@
     <p class="mt-2 text-sm text-slate-600">Instruments ready for replay</p>
   </article>
   <article class="glass-panel rounded-[1.5rem] px-6 py-5 shadow-panel">
-    <p class="text-sm uppercase tracking-[0.2em] text-sea">Avg readiness</p>
-    <h3 class="mt-2 text-3xl font-bold text-ink">{{ audit.summary.avg_readiness_score|format_float }}</h3>
-    <p class="mt-2 text-sm text-slate-600">Average readiness score</p>
+    <p class="text-sm uppercase tracking-[0.2em] text-sea">L2 quality</p>
+    <h3 class="mt-2 text-3xl font-bold text-ink">{{ audit.summary.avg_l2_quality_score|format_float }}</h3>
+    <p class="mt-2 text-sm text-slate-600">Crossed/gaps/session-break reliability</p>
   </article>
   <article class="glass-panel rounded-[1.5rem] px-6 py-5 shadow-panel">
-    <p class="text-sm uppercase tracking-[0.2em] text-sea">Depth10 rows</p>
-    <h3 class="mt-2 text-3xl font-bold text-ink">{{ audit.summary.total_row_counts.order_book_depths|format_int }}</h3>
-    <p class="mt-2 text-sm text-slate-600">Optional depth10 rows</p>
+    <p class="text-sm uppercase tracking-[0.2em] text-sea">Audit confidence</p>
+    <h3 class="mt-2 text-3xl font-bold text-ink">{{ audit.summary.avg_audit_confidence_score|format_float }}</h3>
+    <p class="mt-2 text-sm text-slate-600">How much we trust the scan</p>
+  </article>
+</section>
+
+<section class="mb-8 grid gap-6 lg:grid-cols-3">
+  <article class="glass-panel rounded-[1.5rem] px-6 py-5 shadow-panel">
+    <p class="text-sm uppercase tracking-[0.2em] text-sea">Backtest readiness</p>
+    <h3 class="mt-2 text-3xl font-bold text-ink">{{ audit.summary.avg_backtest_readiness_score|format_float }}</h3>
+    <p class="mt-2 text-sm text-slate-600">Data completeness for Nautilus</p>
+  </article>
+  <article class="glass-panel rounded-[1.5rem] px-6 py-5 shadow-panel">
+    <p class="text-sm uppercase tracking-[0.2em] text-sea">Fenced ranges</p>
+    <h3 class="mt-2 text-3xl font-bold text-ink">{{ audit.summary.total_fenced_range_count|format_int }}</h3>
+    <p class="mt-2 text-sm text-slate-600">Reliability issues retained from reports</p>
+  </article>
+  <article class="glass-panel rounded-[1.5rem] px-6 py-5 shadow-panel">
+    <p class="text-sm uppercase tracking-[0.2em] text-sea">Convert report</p>
+    <h3 class="mt-2 text-2xl font-bold text-ink">{{ "Found" if audit.summary.convert_report_found else "Missing" }}</h3>
+    <p class="mt-2 break-all text-sm text-slate-600">{{ audit.summary.convert_report_path or "No report selected" }}</p>
   </article>
 </section>
 {% endif %}
@@ -174,7 +192,7 @@
           <th class="px-4 py-2"><button class="inventory-sort" data-key="trade" data-numeric="true">trade_tick</button></th>
           <th class="px-4 py-2"><button class="inventory-sort" data-key="delta" data-numeric="true">order_book_deltas</button></th>
           <th class="px-4 py-2"><button class="inventory-sort" data-key="depth" data-numeric="true">depth10 (opt.)</button></th>
-          <th class="px-4 py-2"><button class="inventory-sort" data-key="readiness" data-numeric="true">Readiness</button></th>
+          <th class="px-4 py-2"><button class="inventory-sort" data-key="readiness" data-numeric="true">Backtest readiness</button></th>
           <th class="px-4 py-2">Explorer</th>
         </tr>
       </thead>
@@ -189,7 +207,7 @@
           data-trade="{{ instrument.coverage.trade_tick.file_count }}"
           data-delta="{{ instrument.coverage.order_book_deltas.file_count if instrument.coverage.order_book_deltas else 0 }}"
           data-depth="{{ instrument.coverage.order_book_depths.file_count if instrument.coverage.order_book_depths else 0 }}"
-          data-readiness="{{ audit_item.readiness.readiness_score if audit_item else 0 }}"
+          data-readiness="{{ audit_item.readiness.backtest_readiness_score if audit_item else 0 }}"
           data-has-data="{{ 1 if instrument.has_any_data else 0 }}"
         >
           <td class="rounded-l-2xl px-4 py-4 font-semibold text-ink">{{ instrument.instrument_id }}</td>
@@ -224,10 +242,10 @@
           <td class="px-4 py-4 text-slate-700">
             {% if audit_item %}
             <span class="rounded-full px-3 py-1 text-xs font-semibold
-              {% if audit_item.readiness.readiness_score >= 80 %}bg-emerald-100 text-emerald-800
-              {% elif audit_item.readiness.readiness_score >= 50 %}bg-amber-100 text-amber-800
+              {% if audit_item.readiness.backtest_readiness_score >= 80 %}bg-emerald-100 text-emerald-800
+              {% elif audit_item.readiness.backtest_readiness_score >= 50 %}bg-amber-100 text-amber-800
               {% else %}bg-rose-100 text-rose-800{% endif %}">
-              {{ audit_item.readiness.readiness_score|format_float }}
+              {{ audit_item.readiness.backtest_readiness_score|format_float }}
             </span>
             {% else %}
             &mdash;
@@ -252,7 +270,7 @@
     <div class="flex items-center justify-between gap-4">
       <div>
         <p class="text-sm uppercase tracking-[0.22em] text-sea">Readiness offenders</p>
-        <h2 class="mt-2 text-2xl font-bold text-ink">Lowest readiness</h2>
+        <h2 class="mt-2 text-2xl font-bold text-ink">Lowest completeness</h2>
       </div>
       <a href="/readiness" class="text-sm font-semibold text-sea">Details</a>
     </div>
@@ -261,10 +279,10 @@
       <a href="/instrument/{{ item.instrument_id }}" class="flex items-center justify-between rounded-2xl bg-white px-4 py-3 text-sm shadow-sm">
         <span class="font-medium text-ink">{{ item.instrument_id }}</span>
         <span class="rounded-full px-2 py-0.5 text-xs font-semibold
-          {% if item.readiness_score >= 80 %}bg-emerald-100 text-emerald-800
-          {% elif item.readiness_score >= 50 %}bg-amber-100 text-amber-800
+          {% if item.backtest_readiness_score >= 80 %}bg-emerald-100 text-emerald-800
+          {% elif item.backtest_readiness_score >= 50 %}bg-amber-100 text-amber-800
           {% else %}bg-rose-100 text-rose-800{% endif %}">
-          {{ item.readiness_score|format_float }}
+          {{ item.backtest_readiness_score|format_float }}
         </span>
       </a>
       {% endfor %}
@@ -340,7 +358,9 @@
           <th class="px-4 py-2">Delta range</th>
           <th class="px-4 py-2">Delta max gap</th>
           <th class="px-4 py-2">Depth10 (opt.)</th>
-          <th class="px-4 py-2">Readiness</th>
+          <th class="px-4 py-2">Backtest readiness</th>
+          <th class="px-4 py-2">L2 quality</th>
+          <th class="px-4 py-2">Audit confidence</th>
           <th class="px-4 py-2">Backtest ready</th>
         </tr>
       </thead>
@@ -354,7 +374,10 @@
             <a href="/instrument/{{ instrument.instrument_id }}" class="font-semibold text-ink hover:text-sea">{{ instrument.instrument_id }}</a>
             <div class="text-xs text-slate-500">{{ instrument.instrument_type }}</div>
           </td>
-          <td class="px-4 py-4 text-slate-700">{{ trade.row_count_estimate|format_int if trade.present else "&mdash;" }}</td>
+          <td class="px-4 py-4 text-slate-700">
+            <div>{{ trade.row_count_estimate|format_int if trade.present else "&mdash;" }}</div>
+            {% if trade.present %}<div class="mt-1 text-xs text-slate-500">{{ trade.status }} · {{ trade.timestamp_status }}</div>{% endif %}
+          </td>
           <td class="px-4 py-4 text-xs text-slate-600">
             {% if trade.present %}
             <div>{{ trade.ts_event_min_iso or "&mdash;" }}</div>
@@ -362,7 +385,10 @@
             {% else %}&mdash;{% endif %}
           </td>
           <td class="px-4 py-4 text-slate-700">{{ trade.max_gap_seconds|format_seconds if trade.present else "&mdash;" }}</td>
-          <td class="px-4 py-4 text-slate-700">{{ delta.row_count_estimate|format_int if delta and delta.present else "&mdash;" }}</td>
+          <td class="px-4 py-4 text-slate-700">
+            <div>{{ delta.row_count_estimate|format_int if delta and delta.present else "&mdash;" }}</div>
+            {% if delta and delta.present %}<div class="mt-1 text-xs text-slate-500">{{ delta.status }} · {{ delta.timestamp_status }}</div>{% endif %}
+          </td>
           <td class="px-4 py-4 text-xs text-slate-600">
             {% if delta and delta.present %}
             <div>{{ delta.ts_event_min_iso or "&mdash;" }}</div>
@@ -370,15 +396,20 @@
             {% else %}&mdash;{% endif %}
           </td>
           <td class="px-4 py-4 text-slate-700">{{ delta.max_gap_seconds|format_seconds if delta and delta.present else "&mdash;" }}</td>
-          <td class="px-4 py-4 text-slate-700">{{ depth.row_count_estimate|format_int if depth and depth.present else "&mdash;" }}</td>
+          <td class="px-4 py-4 text-slate-700">
+            <div>{{ depth.row_count_estimate|format_int if depth and depth.present else "&mdash;" }}</div>
+            {% if depth and depth.present %}<div class="mt-1 text-xs text-slate-500">{{ depth.status }} · {{ depth.timestamp_status }}</div>{% endif %}
+          </td>
           <td class="px-4 py-4">
             <span class="rounded-full px-3 py-1 text-xs font-semibold
-              {% if instrument.readiness.readiness_score >= 80 %}bg-emerald-100 text-emerald-800
-              {% elif instrument.readiness.readiness_score >= 50 %}bg-amber-100 text-amber-800
+              {% if instrument.readiness.backtest_readiness_score >= 80 %}bg-emerald-100 text-emerald-800
+              {% elif instrument.readiness.backtest_readiness_score >= 50 %}bg-amber-100 text-amber-800
               {% else %}bg-rose-100 text-rose-800{% endif %}">
-              {{ instrument.readiness.readiness_score|format_float }}
+              {{ instrument.readiness.backtest_readiness_score|format_float }}
             </span>
           </td>
+          <td class="px-4 py-4 text-slate-700">{{ instrument.l2_quality_score|format_float }}</td>
+          <td class="px-4 py-4 text-slate-700">{{ instrument.audit_confidence_score|format_float }}</td>
           <td class="rounded-r-2xl px-4 py-4">
             {% if instrument.readiness.is_backtest_ready %}
             <span class="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-800">Yes</span>

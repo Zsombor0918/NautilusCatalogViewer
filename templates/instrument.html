@@ -17,7 +17,7 @@
         <p class="mb-3 text-sm font-semibold uppercase tracking-[0.24em] text-sea">Instrument explorer</p>
         <h1 class="max-w-3xl text-4xl font-bold tracking-tight text-ink sm:text-5xl">{{ instrument.instrument_id }}</h1>
         <p class="mt-4 max-w-3xl text-lg text-slate-600">
-          Delta-first catalog inspection &mdash; trades, deltas, optional depth10, readiness and report context.
+          Delta-first catalog inspection &mdash; trades, deltas, optional depth10, backtest readiness, L2 reliability and audit confidence.
         </p>
         <div class="mt-6 flex flex-wrap gap-3 text-sm text-slate-600">
           <span class="rounded-full bg-mist px-4 py-2">Type: {{ instrument.instrument_type }}</span>
@@ -147,13 +147,26 @@
     {% if readiness %}
     <div class="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
       <div class="rounded-2xl bg-mist px-4 py-3">
-        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">readiness score</div>
-        <div class="mt-2 text-2xl font-bold text-ink">{{ readiness.readiness_score|round(1) }}<span class="ml-1 text-sm font-normal text-slate-400">/ 100</span></div>
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">backtest readiness</div>
+        <div class="mt-2 text-2xl font-bold text-ink">{{ readiness.backtest_readiness_score|round(1) }}<span class="ml-1 text-sm font-normal text-slate-400">/ 100</span></div>
+        <div class="mt-1 text-xs text-slate-500">Data completeness for Nautilus</div>
+      </div>
+      <div class="rounded-2xl bg-mist px-4 py-3">
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">l2 quality</div>
+        <div class="mt-2 text-2xl font-bold text-ink">{{ (audit_item.l2_quality_score if audit_item else 100.0)|round(1) }}<span class="ml-1 text-sm font-normal text-slate-400">/ 100</span></div>
+        <div class="mt-1 text-xs text-slate-500">Crossed/gaps/session-break reliability</div>
+      </div>
+      <div class="rounded-2xl bg-mist px-4 py-3">
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">audit confidence</div>
+        <div class="mt-2 text-2xl font-bold text-ink">{{ (audit_item.audit_confidence_score if audit_item else 0.0)|round(1) }}<span class="ml-1 text-sm font-normal text-slate-400">/ 100</span></div>
+        <div class="mt-1 text-xs text-slate-500">How much we trust the scan</div>
       </div>
       <div class="rounded-2xl bg-mist px-4 py-3">
         <div class="text-xs uppercase tracking-[0.18em] text-slate-500">is_backtest_ready</div>
         <div class="mt-2 text-sm font-semibold {% if readiness.is_backtest_ready %}text-emerald-600{% else %}text-coral{% endif %}">{{ readiness.is_backtest_ready }}</div>
       </div>
+    </div>
+    <div class="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
       <div class="rounded-2xl bg-mist px-4 py-3">
         <div class="text-xs uppercase tracking-[0.18em] text-slate-500">is_consumable</div>
         <div class="mt-2 text-sm font-semibold {% if readiness.is_consumable %}text-emerald-600{% else %}text-coral{% endif %}">{{ readiness.is_consumable }}</div>
@@ -202,7 +215,7 @@
       <h3 class="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Score breakdown</h3>
 
       {# Simple score bar: green = final score, red = applied penalties, grey = unused #}
-      {% set score_pct = readiness.readiness_score %}
+      {% set score_pct = readiness.backtest_readiness_score %}
       {% set penalty_pct = namespace(v=0) %}
       {% for comp in readiness.score_breakdown %}{% if not comp.positive %}{% set penalty_pct.v = penalty_pct.v + (comp.points | abs) %}{% endif %}{% endfor %}
       {% set penalty_vis = [penalty_pct.v, 100 - score_pct] | min %}
@@ -253,8 +266,8 @@
             </tr>
             {% endfor %}
             <tr class="bg-slate-100">
-              <td class="rounded-l-xl px-3 py-2 font-bold text-ink">Total (capped 0 – 100)</td>
-              <td class="px-3 py-2 text-right font-bold tabular-nums text-ink">{{ "%.2f" | format(readiness.readiness_score) }}</td>
+              <td class="rounded-l-xl px-3 py-2 font-bold text-ink">Total (0 - 100)</td>
+              <td class="px-3 py-2 text-right font-bold tabular-nums text-ink">{{ "%.2f" | format(readiness.backtest_readiness_score) }}</td>
               <td class="rounded-r-xl px-3 py-2 text-xs text-slate-400"></td>
             </tr>
           </tbody>
@@ -271,6 +284,22 @@
         <li class="flex items-start gap-2 rounded-xl bg-amber-50 px-4 py-2 text-sm text-amber-700">
           <span class="mt-0.5 text-amber-500">&#9888;</span>{{ lim }}
         </li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    {% if audit_item and (audit_item.l2_quality_issues or audit_item.audit_confidence_issues or audit_item.reliability_suggestions) %}
+    <div class="mt-4">
+      <h3 class="mb-2 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Reliability issues / improvement suggestions</h3>
+      <ul class="space-y-1">
+        {% for issue in audit_item.l2_quality_issues %}
+        <li class="flex items-start gap-2 rounded-xl bg-amber-50 px-4 py-2 text-sm text-amber-700"><span class="mt-0.5 text-amber-500">&#9888;</span>{{ issue }}</li>
+        {% endfor %}
+        {% for issue in audit_item.audit_confidence_issues %}
+        <li class="flex items-start gap-2 rounded-xl bg-rose-50 px-4 py-2 text-sm text-rose-700"><span class="mt-0.5 text-rose-500">&#9888;</span>{{ issue }}</li>
+        {% endfor %}
+        {% for suggestion in audit_item.reliability_suggestions %}
+        <li class="flex items-start gap-2 rounded-xl bg-blue-50 px-4 py-2 text-sm text-blue-700"><span class="mt-0.5 text-blue-500">&#9432;</span>{{ suggestion }}</li>
         {% endfor %}
       </ul>
     </div>
@@ -1015,7 +1044,7 @@
     status.textContent = `${quality.bad_snapshot_count}/${quality.snapshot_count} bad snapshots`;
 
     cards.innerHTML = `
-      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">quality score</div><div class="mt-2 text-sm font-semibold text-ink">${quality.quality_score}</div></div>
+      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">l2 quality score</div><div class="mt-2 text-sm font-semibold text-ink">${quality.l2_quality_score ?? quality.quality_score}</div></div>
       <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">crossed rate</div><div class="mt-2 text-sm font-semibold text-ink">${(quality.crossed_rate * 100).toFixed(2)}%</div></div>
       <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">empty rate</div><div class="mt-2 text-sm font-semibold text-ink">${(quality.empty_side_rate * 100).toFixed(2)}%</div></div>
       <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">session breaks</div><div class="mt-2 text-sm font-semibold text-ink">${quality.session_break_count}</div></div>

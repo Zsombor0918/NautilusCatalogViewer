@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import heapq
 import json
+import os
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -11,7 +12,7 @@ from typing import Any, Callable
 import numpy as np
 import pyarrow.parquet as pq
 
-from .l2_checks import estimate_missing_ratio, run_l2_checks
+from .l2_checks import compute_l2_quality_score, estimate_missing_ratio, run_l2_checks
 from .models import (
     AuditInstrumentResult,
     AuditResponse,
@@ -43,6 +44,15 @@ except Exception:  # pragma: no cover
 
 INSTRUMENT_TYPE_DIRS: tuple[str, ...] = ("crypto_perpetual", "currency_pair")
 EVENT_DATA_TYPES: tuple[str, ...] = ("trade_tick", "order_book_deltas", "order_book_depths")
+TIMESTAMP_CANDIDATES: tuple[str, ...] = (
+    "ts_event",
+    "ts_init",
+    "event_ts",
+    "ts",
+    "timestamp",
+    "time",
+    "ts_recv",
+)
 
 ProgressCallback = Callable[[str, int, int, str], None]
 
@@ -81,7 +91,7 @@ def _dedupe_warnings(warnings: list[CatalogWarning]) -> list[CatalogWarning]:
     return unique
 
 
-from .scoring import compute_readiness_breakdown, compute_readiness_score
+from .scoring import compute_readiness_breakdown, compute_readiness_score, readiness_status_for_score
 
 
 def _converter_key_to_instrument_id(key: str) -> str:
@@ -95,21 +105,222 @@ def _converter_key_to_instrument_id(key: str) -> str:
     return f"{symbol}-PERP.{exchange}" if is_perp else f"{symbol}.{exchange}"
 
 
-def _load_converter_report(converter_reports_dir: Path) -> dict:
-    """Load the latest YYYY-MM-DD.json from the converter reports directory.
-
-    Returns the parsed JSON dict or an empty dict if none found.
-    """
-    if not converter_reports_dir.exists():
-        return {}
-    json_files = sorted(converter_reports_dir.glob("*.json"))
-    if not json_files:
-        return {}
-    latest = json_files[-1]  # alphabetical == date order
+def _coerce_int(value: Any, default: int = 0) -> int:
     try:
-        return json.loads(latest.read_text(encoding="utf-8"))
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_str_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, dict):
+        return [str(key) for key in value]
+    return [str(value)]
+
+
+def _normalize_report_symbol(value: str) -> str:
+    if "/" in value:
+        return _converter_key_to_instrument_id(value)
+    return value
+
+
+def _selected_converter_report(
+    converter_reports_dir: Path | None,
+    *,
+    report_date: str | None = None,
+) -> tuple[dict, Path | None, str | None, list[str]]:
+    """Load the selected converter report.
+
+    Latest YYYY-MM-DD.json wins when no report date is requested.
+    """
+    warnings: list[str] = []
+    if converter_reports_dir is None:
+        return {}, None, None, warnings
+    if not converter_reports_dir.exists():
+        warnings.append(f"Converter report directory does not exist: {converter_reports_dir}")
+        return {}, None, None, warnings
+    if report_date:
+        candidate = converter_reports_dir / f"{report_date}.json"
+        if not candidate.exists():
+            warnings.append(f"Converter report for {report_date} was not found in {converter_reports_dir}")
+            return {}, None, report_date, warnings
+        selected = candidate
+    else:
+        json_files = sorted(path for path in converter_reports_dir.glob("*.json") if re.match(r"\d{4}-\d{2}-\d{2}\.json$", path.name))
+        if not json_files:
+            json_files = sorted(converter_reports_dir.glob("*.json"))
+        if not json_files:
+            warnings.append(f"No converter reports found in {converter_reports_dir}")
+            return {}, None, None, warnings
+        selected = json_files[-1]
+        report_date = selected.stem
+    try:
+        return json.loads(selected.read_text(encoding="utf-8")), selected, report_date, warnings
+    except Exception as exc:
+        warnings.append(f"Converter report could not be read: {exc}")
+        return {}, selected, report_date, warnings
+
+
+def _load_converter_report(converter_reports_dir: Path, report_date: str | None = None) -> dict:
+    """Backward-compatible helper returning only the parsed report dict."""
+    raw, _, _, _ = _selected_converter_report(converter_reports_dir, report_date=report_date)
+    return raw
+
+
+def _converter_report_timestamp(raw: dict) -> str | None:
+    for key in ("timestamp", "generated_at", "created_at", "finished_at", "ts"):
+        value = raw.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _converter_report_warnings(raw: dict, discovery_warnings: list[str]) -> list[str]:
+    warnings = list(discovery_warnings)
+    for key in ("warnings", "converter_warnings", "errors"):
+        warnings.extend(_coerce_str_list(raw.get(key)))
+    return warnings
+
+
+def _converter_report_paths(raw: dict, selected_path: Path | None) -> list[str]:
+    paths = _coerce_str_list(raw.get("report_paths"))
+    extra = raw.get("convert_report_extra_path")
+    if extra:
+        paths.append(str(extra))
+    if selected_path is not None:
+        paths.insert(0, str(selected_path))
+    seen: set[str] = set()
+    result: list[str] = []
+    for path in paths:
+        if path and path not in seen:
+            seen.add(path)
+            result.append(path)
+    return result
+
+
+def _converter_catalog_matches(raw: dict, catalog_root: Path) -> bool | None:
+    report_catalog_root = raw.get("catalog_root")
+    if not report_catalog_root:
+        return None
+    try:
+        return Path(str(report_catalog_root)).expanduser().resolve() == catalog_root
     except Exception:
-        return {}
+        return str(report_catalog_root) == str(catalog_root)
+
+
+def _converter_bad_lines(raw: dict) -> int:
+    for key in ("bad_lines", "bad_line_count", "malformed_lines"):
+        if key in raw:
+            return _coerce_int(raw.get(key))
+    return 0
+
+
+def _converter_global_count(raw: dict, *keys: str) -> int:
+    for key in keys:
+        if key in raw:
+            value = raw.get(key)
+            if isinstance(value, list):
+                return len(value)
+            return _coerce_int(value)
+    return 0
+
+
+def _converter_missing_symbol_set(raw: dict) -> set[str]:
+    keys = (
+        "missing_raw_symbols",
+        "missing_converted_symbols",
+        "missing_symbols",
+        "unconverted_symbols",
+    )
+    result: set[str] = set()
+    for key in keys:
+        result.update(_normalize_report_symbol(item) for item in _coerce_str_list(raw.get(key)))
+    return result
+
+
+def _converter_partial_unreadable_symbol_set(raw: dict) -> set[str]:
+    keys = (
+        "partial_symbols",
+        "unreadable_symbols",
+        "partial_unreadable_symbols",
+        "partial_data_symbols",
+    )
+    result: set[str] = set()
+    for key in keys:
+        result.update(_normalize_report_symbol(item) for item in _coerce_str_list(raw.get(key)))
+    return result
+
+
+def _converter_row_count_for_instrument(raw: dict, instrument_id: str, data_type: str) -> int | None:
+    """Best-effort per-symbol row count from CryptoRecorder convert reports."""
+    keys_by_type = {
+        "trade_tick": ("per_symbol_trade", "per_symbol_trades", "trade_tick"),
+        "order_book_deltas": ("per_symbol_deltas", "per_symbol_delta", "per_symbol_depth", "order_book_deltas"),
+        "order_book_depths": ("per_symbol_depth", "per_symbol_depth10", "order_book_depths"),
+    }
+    count_keys_by_type = {
+        "trade_tick": ("ticks_written", "trades_written", "trade_ticks_written", "rows_written", "row_count", "count"),
+        "order_book_deltas": ("deltas_written", "rows_written", "row_count", "count"),
+        "order_book_depths": ("depth10_written", "depths_written", "rows_written", "row_count", "count"),
+    }
+    report_keys = keys_by_type.get(data_type, ())
+    count_keys = count_keys_by_type.get(data_type, ("rows_written", "row_count", "count"))
+    for report_key in report_keys:
+        section = raw.get(report_key)
+        if not isinstance(section, dict):
+            continue
+        for key, value in section.items():
+            if _normalize_report_symbol(str(key)) != instrument_id:
+                continue
+            if isinstance(value, dict):
+                for count_key in count_keys:
+                    if count_key in value:
+                        return _coerce_int(value.get(count_key))
+            return _coerce_int(value)
+
+    integrity = raw.get("conversion_integrity")
+    if isinstance(integrity, dict):
+        by_symbol = integrity.get("by_symbol") or integrity.get("per_symbol")
+        if isinstance(by_symbol, dict):
+            value = by_symbol.get(instrument_id)
+            if value is None:
+                for key, candidate in by_symbol.items():
+                    if _normalize_report_symbol(str(key)) == instrument_id:
+                        value = candidate
+                        break
+            if isinstance(value, dict):
+                for count_key in count_keys:
+                    if count_key in value:
+                        return _coerce_int(value.get(count_key))
+    return None
+
+
+def _converter_readiness_classification(raw: dict, instrument_id: str) -> str | None:
+    section = raw.get("readiness_classification")
+    if not isinstance(section, dict):
+        return None
+    value = section.get(instrument_id)
+    if value is None:
+        for key, candidate in section.items():
+            if _normalize_report_symbol(str(key)) == instrument_id:
+                value = candidate
+                break
+    if isinstance(value, dict):
+        for key in ("status", "classification", "readiness_status"):
+            if value.get(key):
+                return str(value[key])
+        return None
+    if value is not None:
+        return str(value)
+    return None
 
 
 def _build_converter_trade_presence(converter_report: dict) -> dict:
@@ -208,20 +419,24 @@ class CatalogScanner:
         catalog_root: Path | str,
         cache_path: Path | str | None = None,
         converter_reports_dir: Path | str | None = None,
+        convert_report_date: str | None = None,
     ) -> None:
         self.catalog_root = Path(catalog_root).expanduser().resolve()
         project_root = Path(__file__).resolve().parent.parent
         default_cache = project_root / "state" / "web_audit_cache.json"
         self.cache_path = Path(cache_path).expanduser().resolve() if cache_path else default_cache
-        # Converter reports directory: explicit arg > env var > None
-        import os as _os
-        _env = _os.getenv("NAUTILUS_CONVERTER_REPORTS_DIR")
+        self.convert_report_date = convert_report_date
+        # Converter reports directory:
+        # explicit arg > NAUTILUS_VIEWER_CONVERT_REPORT_DIR > sibling > app-local fallback.
+        _env = os.getenv("NAUTILUS_VIEWER_CONVERT_REPORT_DIR") or os.getenv("NAUTILUS_CONVERTER_REPORTS_DIR")
         if converter_reports_dir is not None:
             self.converter_reports_dir: Path | None = Path(converter_reports_dir).expanduser().resolve()
         elif _env:
             self.converter_reports_dir = Path(_env).expanduser().resolve()
         else:
-            self.converter_reports_dir = None
+            sibling = self.catalog_root.parent / "convert_reports"
+            app_local = project_root / "state" / "convert_reports"
+            self.converter_reports_dir = sibling if sibling.exists() else app_local
         self._nautilus_catalog: Any | None = None
         self._nautilus_catalog_initialized = False
         self.query_service = CatalogQueryService(self.catalog_root)
@@ -330,74 +545,174 @@ class CatalogScanner:
     def _resolve_ts_for_parquet(schema_names: list[str]) -> str:
         """Return the best ts column name available in a parquet schema.
 
-        Prefers ``ts_event``, then ``event_ts``, then ``ts``, then any column
-        whose name contains ``ts_event``.  Raises ``KeyError`` when none found.
+        Handles both regular schema names and row-group ``path_in_schema``
+        values, which may include nested paths.
         """
-        for candidate in ("ts_event", "event_ts", "ts"):
-            if candidate in schema_names:
-                return candidate
+        normalized = {name.lower(): name for name in schema_names}
+        for candidate in TIMESTAMP_CANDIDATES:
+            if candidate in normalized:
+                return normalized[candidate]
         for name in schema_names:
-            if "ts_event" in name:
+            parts = re.split(r"[./]", name.lower())
+            if any(part in TIMESTAMP_CANDIDATES for part in parts):
+                return name
+        for candidate in ("ts_event", "ts_init"):
+            for name in schema_names:
+                lname = name.lower()
+                if lname.endswith(candidate) or candidate in lname:
+                    return name
+        for name in schema_names:
+            lname = name.lower()
+            if "timestamp" in lname or lname.endswith("ts"):
                 return name
         raise KeyError(f"No ts_event-like column found in schema: {schema_names}")
 
-    def _metadata_ts_bounds(self, parquet_file: pq.ParquetFile) -> tuple[int | None, int | None]:
+    @staticmethod
+    def _ts_array_to_int64(values: Any) -> np.ndarray:
+        arr = np.asarray(values)
+        if arr.size == 0:
+            return np.asarray([], dtype=np.int64)
+        if np.issubdtype(arr.dtype, np.datetime64):
+            return arr.astype("datetime64[ns]").astype(np.int64)
+        return arr.astype(np.int64)
+
+    def _schema_names_for_parquet(self, parquet_file: pq.ParquetFile) -> list[str]:
+        names: list[str] = []
+        try:
+            names.extend(parquet_file.schema_arrow.names)
+        except Exception:
+            pass
         metadata = parquet_file.metadata
-        # Discover the ts column name from the first row-group's schema
-        schema_names: list[str] = []
         if metadata.num_row_groups > 0:
             rg0 = metadata.row_group(0)
-            schema_names = [rg0.column(ci).path_in_schema for ci in range(rg0.num_columns)]
-        try:
-            ts_col = self._resolve_ts_for_parquet(schema_names)
-        except KeyError:
-            return None, None
+            for ci in range(rg0.num_columns):
+                path = rg0.column(ci).path_in_schema
+                if path not in names:
+                    names.append(path)
+        return names
+
+    def _metadata_ts_bounds_with_status(self, parquet_file: pq.ParquetFile, ts_col: str) -> tuple[int | None, int | None, bool]:
+        metadata = parquet_file.metadata
         min_ts: int | None = None
         max_ts: int | None = None
+        stats_available = False
         for rgi in range(metadata.num_row_groups):
             rg = metadata.row_group(rgi)
             for ci in range(rg.num_columns):
                 col = rg.column(ci)
-                if col.path_in_schema != ts_col or col.statistics is None:
+                if col.path_in_schema != ts_col and col.path_in_schema.split(".")[-1] != ts_col:
+                    continue
+                if col.statistics is None:
                     continue
                 stats = col.statistics
                 if not stats.has_min_max:
                     continue
+                stats_available = True
                 cmin, cmax = int(stats.min), int(stats.max)
                 min_ts = cmin if min_ts is None else min(min_ts, cmin)
                 max_ts = cmax if max_ts is None else max(max_ts, cmax)
+        return min_ts, max_ts, stats_available
+
+    def _metadata_ts_bounds(self, parquet_file: pq.ParquetFile) -> tuple[int | None, int | None]:
+        try:
+            ts_col = self._resolve_ts_for_parquet(self._schema_names_for_parquet(parquet_file))
+        except KeyError:
+            return None, None
+        min_ts, max_ts, _ = self._metadata_ts_bounds_with_status(parquet_file, ts_col)
         return min_ts, max_ts
 
-    def _scan_ts_bounds_fallback(self, file_path: Path) -> tuple[int | None, int | None]:
-        # Read schema to find the ts column
+    def _scan_ts_bounds_fallback(self, file_path: Path, ts_col: str | None = None) -> tuple[int | None, int | None]:
         pf_schema = pq.read_schema(file_path)
         try:
-            ts_col = self._resolve_ts_for_parquet(pf_schema.names)
+            ts_col = ts_col or self._resolve_ts_for_parquet(pf_schema.names)
         except KeyError:
             return None, None
         table = pq.read_table(file_path, columns=[ts_col])
         if table.num_rows == 0:
             return None, None
-        values = np.asarray(table.column(ts_col).combine_chunks().to_numpy(), dtype=np.int64)
+        column = table.column(ts_col).combine_chunks()
+        if column.null_count:
+            column = column.drop_null()
+        values = self._ts_array_to_int64(column.to_numpy(zero_copy_only=False))
         if values.size == 0:
             return None, None
         return int(values.min()), int(values.max())
 
-    def _summarize_files(self, files: list[Path]) -> tuple[int, int | None, int | None]:
+    def _inspect_parquet_file(self, file_path: Path) -> dict[str, Any]:
+        info: dict[str, Any] = {
+            "path": str(file_path),
+            "metadata_num_rows": None,
+            "schema_names": [],
+            "timestamp_column": None,
+            "row_group_stats_available": False,
+            "fallback_min_ts": None,
+            "fallback_max_ts": None,
+            "metadata_min_ts": None,
+            "metadata_max_ts": None,
+            "timestamp_status": "not_checked",
+            "errors": [],
+        }
+        try:
+            parquet_file = pq.ParquetFile(file_path)
+            metadata = parquet_file.metadata
+            info["metadata_num_rows"] = int(metadata.num_rows)
+        except Exception as exc:
+            info["timestamp_status"] = "metadata_unreadable"
+            info["errors"].append(f"Metadata read error: {exc}")
+            return info
+
+        try:
+            schema_names = self._schema_names_for_parquet(parquet_file)
+            info["schema_names"] = schema_names
+            ts_col = self._resolve_ts_for_parquet(schema_names)
+            info["timestamp_column"] = ts_col
+        except Exception as exc:
+            info["timestamp_status"] = "missing_timestamp_column"
+            info["errors"].append(f"Timestamp column not found: {exc}")
+            return info
+
+        if info["metadata_num_rows"] == 0:
+            info["timestamp_status"] = "no_rows"
+            return info
+
+        try:
+            min_ts, max_ts, stats_available = self._metadata_ts_bounds_with_status(parquet_file, str(info["timestamp_column"]))
+            info["row_group_stats_available"] = stats_available
+            info["metadata_min_ts"] = min_ts
+            info["metadata_max_ts"] = max_ts
+            if min_ts is not None and max_ts is not None:
+                info["timestamp_status"] = "stats_available"
+                return info
+        except Exception as exc:
+            info["errors"].append(f"Timestamp metadata stats error: {exc}")
+
+        try:
+            fmin, fmax = self._scan_ts_bounds_fallback(file_path, str(info["timestamp_column"]))
+            info["fallback_min_ts"] = fmin
+            info["fallback_max_ts"] = fmax
+            info["timestamp_status"] = "fallback_read" if fmin is not None and fmax is not None else "fallback_empty"
+        except Exception as exc:
+            info["timestamp_status"] = "fallback_failed"
+            info["errors"].append(f"Timestamp fallback read error: {exc}")
+        return info
+
+    def _summarize_files(self, files: list[Path]) -> tuple[int, int | None, int | None, list[dict[str, Any]]]:
         row_count = 0
         min_ts: int | None = None
         max_ts: int | None = None
+        inspections: list[dict[str, Any]] = []
         for fp in files:
-            pf = pq.ParquetFile(fp)
-            row_count += pf.metadata.num_rows
-            fmin, fmax = self._metadata_ts_bounds(pf)
-            if fmin is None or fmax is None:
-                fmin, fmax = self._scan_ts_bounds_fallback(fp)
+            info = self._inspect_parquet_file(fp)
+            inspections.append(info)
+            if info["metadata_num_rows"] is not None:
+                row_count += int(info["metadata_num_rows"])
+            fmin = info["metadata_min_ts"] if info["metadata_min_ts"] is not None else info["fallback_min_ts"]
+            fmax = info["metadata_max_ts"] if info["metadata_max_ts"] is not None else info["fallback_max_ts"]
             if fmin is not None:
                 min_ts = fmin if min_ts is None else min(min_ts, fmin)
             if fmax is not None:
                 max_ts = fmax if max_ts is None else max(max_ts, fmax)
-        return row_count, min_ts, max_ts
+        return row_count, min_ts, max_ts, inspections
 
     def _push_gap(self, *, heap: list[tuple[int, int, int, str | None]], gap_ns: int, previous_ts: int, next_ts: int, source_file: str | None, top_n: int) -> None:
         if gap_ns <= 0:
@@ -415,18 +730,19 @@ class CatalogScanner:
         all_ts: list[int] = []
         sbt_ns = 300 * 1_000_000_000
         sbc = 0
-        # Resolve ts column name from the first file
-        ts_col = "ts_event"
-        if files:
-            try:
-                ts_col = self._resolve_ts_for_parquet(pq.read_schema(files[0]).names)
-            except KeyError:
-                pass
         for fp in files:
-            pf = pq.ParquetFile(fp)
             fl = _relative_file_label(self.catalog_root, fp)
-            for batch in pf.iter_batches(columns=[ts_col], batch_size=65_536):
-                vals = np.asarray(batch.column(0).to_numpy(), dtype=np.int64)
+            try:
+                pf = pq.ParquetFile(fp)
+                ts_col = self._resolve_ts_for_parquet(self._schema_names_for_parquet(pf))
+            except Exception:
+                continue
+            try:
+                batches = pf.iter_batches(columns=[ts_col], batch_size=65_536)
+            except Exception:
+                continue
+            for batch in batches:
+                vals = self._ts_array_to_int64(batch.column(0).to_numpy(zero_copy_only=False))
                 if vals.size == 0:
                     continue
                 all_ts.extend(int(v) for v in vals.tolist())
@@ -454,18 +770,100 @@ class CatalogScanner:
 
     def _scan_data_type(self, data_type: str, files: list[Path]) -> DataTypeAuditStats:
         if not files:
-            return DataTypeAuditStats(data_type=data_type, present=False)
-        rc = 0; min_ts = None; max_ts = None; gaps = []; mr = 0.0; sbc = 0; errs = []
+            return DataTypeAuditStats(data_type=data_type, present=False, status="absent", timestamp_status="not_checked", row_count_source="none")
+        rc = 0; min_ts = None; max_ts = None; gaps = []; mr = 0.0; sbc = 0; errs = []; inspections: list[dict[str, Any]] = []
         try:
-            rc, min_ts, max_ts = self._summarize_files(files)
+            rc, min_ts, max_ts, inspections = self._summarize_files(files)
         except Exception as exc:
             errs.append(f"Metadata scan error: {exc}")
         try:
             gaps, mr, sbc = self._compute_gap_metrics(files, top_n=10)
         except Exception as exc:
             errs.append(f"Gap scan error: {exc}")
+        metadata_failed = bool(files) and (not inspections or any(info["metadata_num_rows"] is None for info in inspections))
+        all_metadata_empty = bool(inspections) and all(info["metadata_num_rows"] == 0 for info in inspections if info["metadata_num_rows"] is not None)
+        timestamp_statuses = [str(info["timestamp_status"]) for info in inspections]
+        timestamp_errors = [
+            error
+            for info in inspections
+            for error in info.get("errors", [])
+            if "Timestamp" in error
+        ]
+        metadata_errors = [
+            error
+            for info in inspections
+            for error in info.get("errors", [])
+            if "Metadata" in error
+        ]
+        errs.extend(metadata_errors)
+        if timestamp_errors:
+            errs.extend(timestamp_errors)
+        if metadata_failed:
+            status = "present_unreadable"
+            row_count_trusted = False
+        elif rc > 0:
+            status = "present_with_rows"
+            row_count_trusted = True
+        elif all_metadata_empty:
+            status = "present_empty"
+            row_count_trusted = True
+        else:
+            status = "present_unknown_rows"
+            row_count_trusted = False
+        if "stats_available" in timestamp_statuses:
+            timestamp_status = "stats_available"
+        elif "fallback_read" in timestamp_statuses:
+            timestamp_status = "fallback_read"
+        elif timestamp_statuses and all(value == "no_rows" for value in timestamp_statuses):
+            timestamp_status = "no_rows"
+        elif "missing_timestamp_column" in timestamp_statuses:
+            timestamp_status = "missing_timestamp_column"
+        elif "fallback_failed" in timestamp_statuses:
+            timestamp_status = "fallback_failed"
+        elif metadata_failed:
+            timestamp_status = "metadata_unreadable"
+        else:
+            timestamp_status = "unknown"
+        if not metadata_failed and rc == 0 and all_metadata_empty:
+            errs = [err for err in errs if "Timestamp column not found" not in err]
         dur = (max_ts - min_ts) / 1e9 if min_ts is not None and max_ts is not None else None
-        return DataTypeAuditStats(data_type=data_type, present=True, file_count=len(files), row_count_estimate=rc, ts_event_min_ns=min_ts, ts_event_min_iso=_ns_to_iso(min_ts), ts_event_max_ns=max_ts, ts_event_max_iso=_ns_to_iso(max_ts), duration_seconds=dur, max_gap_ns=gaps[0].gap_ns if gaps else None, max_gap_seconds=gaps[0].gap_seconds if gaps else None, missing_ratio_estimate=mr, session_break_count=sbc, top_gaps=gaps, corrupt=bool(errs), error="; ".join(errs) if errs else None)
+        return DataTypeAuditStats(data_type=data_type, present=True, status=status, timestamp_status=timestamp_status, row_count_trusted=row_count_trusted, row_count_source="metadata" if row_count_trusted else "unknown", file_count=len(files), row_count_estimate=rc, ts_event_min_ns=min_ts, ts_event_min_iso=_ns_to_iso(min_ts), ts_event_max_ns=max_ts, ts_event_max_iso=_ns_to_iso(max_ts), duration_seconds=dur, max_gap_ns=gaps[0].gap_ns if gaps else None, max_gap_seconds=gaps[0].gap_seconds if gaps else None, missing_ratio_estimate=mr, session_break_count=sbc, top_gaps=gaps, corrupt=status == "present_unreadable", error="; ".join(errs) if errs else None)
+
+    def _apply_convert_report_cross_checks(
+        self,
+        *,
+        instrument_id: str,
+        data_type_results: dict[str, DataTypeAuditStats],
+        converter_raw: dict,
+        warnings: list[CatalogWarning],
+    ) -> None:
+        if not converter_raw:
+            return
+        for data_type, stat in data_type_results.items():
+            convert_rows = _converter_row_count_for_instrument(converter_raw, instrument_id, data_type)
+            if convert_rows is None or convert_rows <= 0:
+                continue
+            audit_uncertain = (
+                stat.file_count > 0
+                and (
+                    stat.row_count_estimate == 0
+                    or not stat.row_count_trusted
+                    or stat.status in {"present_empty", "present_unreadable", "present_unknown_rows"}
+                )
+            )
+            if not audit_uncertain:
+                continue
+            message = (
+                f"{instrument_id} {data_type}: convert report says {convert_rows} rows were written, "
+                f"but audit status is {stat.status} with row_count_estimate={stat.row_count_estimate}."
+            )
+            warnings.append(self._warning("convert_report_audit_mismatch", message))
+            stat.row_count_estimate = max(stat.row_count_estimate, convert_rows)
+            stat.status = "present_unreadable"
+            stat.row_count_trusted = False
+            stat.row_count_source = "convert_report"
+            stat.corrupt = True
+            stat.error = f"{stat.error}; {message}" if stat.error else message
 
     def _run_l2_check(self, instrument_id: str, *, first_n: int, random_n: int, instrument_type: str, warnings: list[CatalogWarning]) -> L2CheckResult:
         cat = self._get_nautilus_catalog(warnings)
@@ -484,13 +882,20 @@ class CatalogScanner:
         data_type_results: dict[str, DataTypeAuditStats],
         report: ReportContext,
         converter_fenced: dict | None = None,
+        converter_report_found: bool = False,
     ) -> ReadinessResult:
         ts = data_type_results.get("trade_tick", DataTypeAuditStats(data_type="trade_tick"))
         ds = data_type_results.get("order_book_deltas", DataTypeAuditStats(data_type="order_book_deltas"))
         dps = data_type_results.get("order_book_depths", DataTypeAuditStats(data_type="order_book_depths"))
-        ht, hd, hdp = ts.present, ds.present, dps.present
+        ht = ts.present and ts.status != "present_empty"
+        hd = ds.present and ds.status != "present_empty"
+        hdp = dps.present and dps.status != "present_empty"
         dfo = hd and not hdp
         sbc = max(ts.session_break_count, ds.session_break_count)
+        partial_unreadable = any(
+            stat.present and stat.status in {"present_unreadable", "present_unknown_rows"} and stat.row_count_source != "convert_report"
+            for stat in (ts, ds, dps)
+        )
 
         # Fenced ranges: prefer converter report over per-instrument report file
         if converter_fenced is not None:
@@ -507,7 +912,6 @@ class CatalogScanner:
         else:
             fenced_count = 0
             fenced_by_reason = {}
-            converter_report_found = False
 
         lims: list[str] = []
         if not ht: lims.append("No trade_tick data")
@@ -518,25 +922,15 @@ class CatalogScanner:
         if report.desync_count > 0: lims.append(f"{report.desync_count} desync event(s)")
         if report.resync_count > 5: lims.append(f"High resync count ({report.resync_count})")
         ic = ht or hd
-        ibr = ht and hd and report.desync_count == 0
-        # Slight penalty when converter diagnostics are missing
-        missing_report_penalty = 0 if converter_report_found else 5
-        rs_raw, breakdown = compute_readiness_breakdown(
+        ibr = ht and hd and not partial_unreadable
+        rs, breakdown = compute_readiness_breakdown(
             has_trade_tick=ht, has_order_book_deltas=hd, has_order_book_depths=hdp,
             trade_row_count=ts.row_count_estimate, delta_row_count=ds.row_count_estimate,
             trade_max_gap_seconds=ts.max_gap_seconds, delta_max_gap_seconds=ds.max_gap_seconds,
             fenced_range_count=fenced_count, desync_count=report.desync_count,
             resync_count=report.resync_count, session_break_count=sbc,
+            partial_unreadable=partial_unreadable,
         )
-        rs = max(0.0, rs_raw - missing_report_penalty)
-        if missing_report_penalty > 0:
-            from .models import ScoreComponent  # noqa: PLC0415
-            breakdown.append(ScoreComponent(
-                label="converter report missing",
-                points=-missing_report_penalty,
-                detail="per-instrument report file not found",
-                positive=False,
-            ))
         return ReadinessResult(
             instrument_id=instrument_id, instrument_type=instrument_type,
             has_trade_tick=ht, has_order_book_deltas=hd, has_order_book_depths=hdp,
@@ -549,15 +943,113 @@ class CatalogScanner:
             converter_report_found=converter_report_found,
             resync_count=report.resync_count, desync_count=report.desync_count,
             snapshot_seed_count=report.snapshot_seed_count,
-            readiness_score=rs, score_breakdown=breakdown, limitations=lims, report=report,
+            backtest_readiness_score=rs,
+            readiness_status=readiness_status_for_score(rs),
+            readiness_score=rs,
+            score_breakdown=breakdown, limitations=lims, report=report,
         )
 
-    def _build_summary(self, instrument_results: list[AuditInstrumentResult], *, converter_presence: dict | None = None) -> AuditSummary:
+    def _instrument_report_signal_counts(
+        self,
+        instrument_id: str,
+        data_type_results: dict[str, DataTypeAuditStats],
+        report: ReportContext,
+        converter_raw: dict,
+        converter_fenced: dict | None,
+    ) -> tuple[dict[str, int], list[str]]:
+        fenced_count = int(converter_fenced["count"]) if converter_fenced is not None else len(report.fenced_ranges)
+        desync_count = max(
+            report.desync_count,
+            _converter_global_count(converter_raw, "desync_events", "desync_count"),
+        )
+        resync_count = max(
+            report.resync_count,
+            _converter_global_count(converter_raw, "resync_count", "resync_events"),
+        )
+        bad_lines = _converter_bad_lines(converter_raw)
+        missing_symbols = _converter_missing_symbol_set(converter_raw)
+        partial_symbols = _converter_partial_unreadable_symbol_set(converter_raw)
+        corrupt_present = sum(
+            1
+            for stat in data_type_results.values()
+            if stat.present and (stat.corrupt or stat.row_count_estimate <= 0 or stat.ts_event_min_ns is None or stat.ts_event_max_ns is None)
+        )
+        missing_symbol_count = 1 if instrument_id in missing_symbols else 0
+        partial_unreadable_count = corrupt_present + (1 if instrument_id in partial_symbols else 0)
+
+        issues: list[str] = []
+        if fenced_count > 0:
+            issues.append(f"{fenced_count} fenced range(s)")
+        if desync_count > 0:
+            issues.append(f"{desync_count} desync event(s)")
+        if resync_count > 0:
+            issues.append(f"{resync_count} resync event(s)")
+        if bad_lines > 0:
+            issues.append(f"{bad_lines} bad raw line(s)")
+        if missing_symbol_count > 0:
+            issues.append("symbol missing in raw/converted report")
+        if partial_unreadable_count > 0:
+            issues.append("partial or unreadable data")
+
+        return {
+            "fenced_range_count": fenced_count,
+            "desync_count": desync_count,
+            "resync_count": resync_count,
+            "bad_lines": bad_lines,
+            "missing_symbol_count": missing_symbol_count,
+            "partial_unreadable_count": partial_unreadable_count,
+        }, issues
+
+    def _compute_audit_confidence(
+        self,
+        *,
+        data_type_results: dict[str, DataTypeAuditStats],
+        converter_raw: dict,
+        converter_selected_path: Path | None,
+        converter_report_date: str | None,
+        converter_catalog_matches: bool | None,
+        converter_trade_mismatch: bool,
+    ) -> tuple[float, list[str]]:
+        penalty = 0.0
+        issues: list[str] = []
+        for data_type, stat in data_type_results.items():
+            if not stat.present:
+                continue
+            if stat.corrupt or stat.row_count_estimate <= 0:
+                penalty += 15.0
+                issues.append(f"{data_type}: unreadable row count")
+            if stat.ts_event_min_ns is None or stat.ts_event_max_ns is None:
+                penalty += 10.0
+                issues.append(f"{data_type}: null timestamp bounds")
+        if converter_selected_path is None or not converter_raw:
+            penalty += 15.0
+            issues.append("missing convert report")
+        elif converter_report_date and converter_report_date != datetime.now(tz=timezone.utc).date().isoformat() and self.convert_report_date is None:
+            penalty += 5.0
+            issues.append(f"convert report date {converter_report_date} is not today's UTC date")
+        if converter_catalog_matches is False:
+            penalty += 20.0
+            issues.append("convert report catalog_root does not match scanned catalog")
+        if converter_trade_mismatch:
+            penalty += 15.0
+            issues.append("audit/convert trade_tick count mismatch")
+        return round(max(0.0, 100.0 - penalty), 2), issues
+
+    def _build_summary(
+        self,
+        instrument_results: list[AuditInstrumentResult],
+        *,
+        converter_presence: dict | None = None,
+        converter_raw: dict | None = None,
+        converter_selected_path: Path | None = None,
+        converter_report_date: str | None = None,
+        converter_discovery_warnings: list[str] | None = None,
+    ) -> AuditSummary:
         dtc = {dt: 0 for dt in EVENT_DATA_TYPES}
         trc = {dt: 0 for dt in EVENT_DATA_TYPES}
         cps: list[ChartPoint] = []
         l2ss = 0; l2bc = 0; l2bi = 0; tqs = 0; tcr = 0; tmo = 0; tem = 0; wqs = 0.0; sbc = 0
-        brc = 0; cc = 0; trs = 0.0; tfr = 0; tdc = 0; trsc = 0
+        brc = 0; cc = 0; trs = 0.0; tl2qs = 0.0; tacs = 0.0; tfr = 0; tdc = 0; trsc = 0
         for inst in instrument_results:
             for dt in EVENT_DATA_TYPES:
                 st = inst.data_types.get(dt)
@@ -568,29 +1060,33 @@ class CatalogScanner:
                     cps.append(ChartPoint(instrument_id=inst.instrument_id, instrument_type=inst.instrument_type, data_type=dt, max_gap_seconds=st.max_gap_seconds))
             r = inst.readiness
             trs += r.readiness_score
+            tl2qs += inst.l2_quality_score
+            tacs += inst.audit_confidence_score
             if r.is_backtest_ready: brc += 1
             if r.is_consumable: cc += 1
             tfr += r.fenced_range_count; tdc += r.desync_count; trsc += r.resync_count
             l2ss += inst.l2_check.sampled_count; l2bc += inst.l2_check.bad_count
             if inst.l2_check.bad_count > 0: l2bi += 1
             tqs += inst.quality_snapshot_count; tcr += inst.crossed_count; tmo += inst.monotonic_violation_count; tem += inst.empty_side_count; sbc += inst.session_break_count
-            wqs += inst.quality_score * max(1, inst.quality_snapshot_count)
+            wqs += inst.l2_quality_score * max(1, inst.quality_snapshot_count)
         l2br = l2bc / l2ss if l2ss else 0.0
         ocr = tcr / tqs if tqs else 0.0; oer = tem / tqs if tqs else 0.0; omr = tmo / tqs if tqs else 0.0
         oqs = wqs / sum(max(1, i.quality_snapshot_count) for i in instrument_results) if instrument_results else 100.0
         ars = trs / len(instrument_results) if instrument_results else 0.0
+        al2qs = tl2qs / len(instrument_results) if instrument_results else 100.0
+        aacs = tacs / len(instrument_results) if instrument_results else 100.0
 
         def _ro(inst):
             r = inst.readiness
             mg = max(r.trade_max_gap_seconds or 0, r.delta_max_gap_seconds or 0) or None
-            return ReadinessOffenderItem(instrument_id=inst.instrument_id, instrument_type=inst.instrument_type, readiness_score=r.readiness_score, has_trade_tick=r.has_trade_tick, has_order_book_deltas=r.has_order_book_deltas, has_order_book_depths=r.has_order_book_depths, is_backtest_ready=r.is_backtest_ready, max_gap_seconds=mg, fenced_range_count=r.fenced_range_count, resync_count=r.resync_count, desync_count=r.desync_count, limitations=r.limitations)
+            return ReadinessOffenderItem(instrument_id=inst.instrument_id, instrument_type=inst.instrument_type, backtest_readiness_score=r.backtest_readiness_score, readiness_status=r.readiness_status, readiness_score=r.readiness_score, l2_quality_score=inst.l2_quality_score, audit_confidence_score=inst.audit_confidence_score, has_trade_tick=r.has_trade_tick, has_order_book_deltas=r.has_order_book_deltas, has_order_book_depths=r.has_order_book_depths, is_backtest_ready=r.is_backtest_ready, max_gap_seconds=mg, fenced_range_count=r.fenced_range_count, resync_count=r.resync_count, desync_count=r.desync_count, limitations=r.limitations)
 
         tro = [_ro(i) for i in sorted(instrument_results, key=lambda x: x.readiness.readiness_score)[:10]]
         tgo = [_ro(i) for i in sorted(instrument_results, key=lambda x: max(x.readiness.trade_max_gap_seconds or 0, x.readiness.delta_max_gap_seconds or 0), reverse=True)[:10]]
         tfo = [_ro(i) for i in sorted(instrument_results, key=lambda x: x.readiness.fenced_range_count, reverse=True)[:10]]
 
         def _qo(inst):
-            return QualityOffenderItem(instrument_id=inst.instrument_id, instrument_type=inst.instrument_type, quality_score=inst.quality_score, max_gap_seconds=inst.max_gap_seconds, crossed_rate=inst.crossed_rate, empty_rate=inst.empty_rate, bad_rate=(inst.quality_bad_snapshot_count / inst.quality_snapshot_count) if inst.quality_snapshot_count else 0.0, snapshot_count=inst.quality_snapshot_count)
+            return QualityOffenderItem(instrument_id=inst.instrument_id, instrument_type=inst.instrument_type, l2_quality_score=inst.l2_quality_score, quality_score=inst.quality_score, max_gap_seconds=inst.max_gap_seconds, crossed_rate=inst.crossed_rate, empty_rate=inst.empty_rate, bad_rate=(inst.quality_bad_snapshot_count / inst.quality_snapshot_count) if inst.quality_snapshot_count else 0.0, snapshot_count=inst.quality_snapshot_count)
 
         tco = [_qo(i) for i in sorted(instrument_results, key=lambda x: x.crossed_rate, reverse=True)[:10]]
         teo = [_qo(i) for i in sorted(instrument_results, key=lambda x: x.empty_rate, reverse=True)[:10]]
@@ -604,20 +1100,33 @@ class CatalogScanner:
             tt_no_data_list = converter_presence.get("no_trade_instrument_ids", [])
             if converter_tt_count is not None and converter_tt_count != viewer_tt_count:
                 tt_mismatch = True
-        return AuditSummary(instrument_count=len(instrument_results), data_type_coverage=dtc, total_row_counts=trc, backtest_ready_count=brc, consumable_count=cc, avg_readiness_score=round(ars, 2), total_fenced_range_count=tfr, total_desync_count=tdc, total_resync_count=trsc, top_readiness_offenders=tro, top_gap_offenders=tgo, top_fenced_offenders=tfo, l2_sampled_snapshot_count=l2ss, l2_bad_count=l2bc, l2_bad_instrument_count=l2bi, l2_bad_rate=l2br, overall_crossed_rate=ocr, overall_empty_rate=oer, overall_monotonic_rate=omr, overall_quality_score=oqs, session_break_count=sbc, chart_points=cps, top_crossed_offenders=tco, top_empty_offenders=teo, viewer_trade_tick_instrument_count=viewer_tt_count, converter_trade_tick_instrument_count=converter_tt_count, trade_tick_detected_mismatch=tt_mismatch, trade_tick_no_data_list=tt_no_data_list)
+        raw = converter_raw or {}
+        report_warnings = _converter_report_warnings(raw, converter_discovery_warnings or [])
+        report_catalog_root = raw.get("catalog_root")
+        report_matches = _converter_catalog_matches(raw, self.catalog_root) if raw else None
+        return AuditSummary(instrument_count=len(instrument_results), data_type_coverage=dtc, total_row_counts=trc, backtest_ready_count=brc, consumable_count=cc, avg_backtest_readiness_score=round(ars, 2), avg_readiness_score=round(ars, 2), avg_l2_quality_score=round(al2qs, 2), avg_audit_confidence_score=round(aacs, 2), total_fenced_range_count=tfr, total_desync_count=tdc, total_resync_count=trsc, top_readiness_offenders=tro, top_gap_offenders=tgo, top_fenced_offenders=tfo, l2_sampled_snapshot_count=l2ss, l2_bad_count=l2bc, l2_bad_instrument_count=l2bi, l2_bad_rate=l2br, overall_crossed_rate=ocr, overall_empty_rate=oer, overall_monotonic_rate=omr, overall_quality_score=round(oqs, 2), session_break_count=sbc, chart_points=cps, top_crossed_offenders=tco, top_empty_offenders=teo, viewer_trade_tick_instrument_count=viewer_tt_count, converter_trade_tick_instrument_count=converter_tt_count, trade_tick_detected_mismatch=tt_mismatch, trade_tick_no_data_list=tt_no_data_list, convert_report_found=bool(raw and converter_selected_path), convert_report_path=str(converter_selected_path) if converter_selected_path else None, convert_report_date=converter_report_date or (str(raw.get("date")) if raw.get("date") else None), convert_report_timestamp=_converter_report_timestamp(raw), convert_report_status=str(raw.get("status")) if raw.get("status") is not None else None, convert_report_catalog_root=str(report_catalog_root) if report_catalog_root else None, convert_report_matches_catalog_root=report_matches, convert_report_paths=_converter_report_paths(raw, converter_selected_path), convert_report_warnings=report_warnings)
 
     def run_audit(self, *, cache_path: Path | str | None = None, first_n: int = 10, random_n: int = 10, progress_callback: ProgressCallback | None = None) -> AuditResponse:
         instrument_index, event_maps, warnings = self._collect_catalog_state()
         inventory = self.scan_inventory()
         iids = [i.instrument_id for i in inventory.instruments]
-        # Load converter report and build per-instrument fenced range map
-        converter_raw = _load_converter_report(self.converter_reports_dir) if self.converter_reports_dir else {}
+        # Load converter report and build per-instrument fenced range map.
+        converter_raw, converter_selected_path, converter_report_date, converter_discovery_warnings = _selected_converter_report(
+            self.converter_reports_dir,
+            report_date=self.convert_report_date,
+        )
         converter_fenced_map = _build_converter_fenced_map(converter_raw) if converter_raw else {}
         converter_trade_presence = _build_converter_trade_presence(converter_raw) if converter_raw else {}
+        converter_matches_catalog = _converter_catalog_matches(converter_raw, self.catalog_root) if converter_raw else None
+        viewer_trade_tick_count = sum(1 for iid in iids if event_maps.get("trade_tick", {}).get(iid))
+        converter_trade_tick_count = converter_trade_presence.get("instruments_with_trades") if converter_trade_presence else None
+        converter_trade_mismatch = converter_trade_tick_count is not None and converter_trade_tick_count != viewer_trade_tick_count
         if converter_raw and not converter_fenced_map:
             warnings.append(self._warning("converter_report_empty", "Converter report found but per_symbol_fenced_ranges is empty."))
-        if self.converter_reports_dir and not converter_raw:
-            warnings.append(self._warning("converter_report_missing", f"No converter reports found in {self.converter_reports_dir}", self.converter_reports_dir))
+        for warning in converter_discovery_warnings:
+            warnings.append(self._warning("converter_report_warning", warning, self.converter_reports_dir))
+        if converter_matches_catalog is False:
+            warnings.append(self._warning("converter_catalog_root_mismatch", "Converter report catalog_root does not match the scanned catalog root.", converter_selected_path))
         total_steps = sum(1 for iid in iids for dt in EVENT_DATA_TYPES if event_maps[dt].get(iid))
         total_steps += sum(1 for iid in iids if event_maps.get("order_book_depths", {}).get(iid))
         total_steps = max(total_steps, 1)
@@ -634,9 +1143,15 @@ class CatalogScanner:
                 if files:
                     cs += 1
                     if progress_callback: progress_callback("scan", cs, total_steps, f"{iid} / {dt} done.")
+            self._apply_convert_report_cross_checks(
+                instrument_id=iid,
+                data_type_results=dtr,
+                converter_raw=converter_raw,
+                warnings=warnings,
+            )
             report = _load_report_context(self.report_dir, iid)
             converter_fenced = converter_fenced_map.get(iid)
-            readiness = self._compute_readiness(iid, itype, dtr, report, converter_fenced=converter_fenced)
+            readiness = self._compute_readiness(iid, itype, dtr, report, converter_fenced=converter_fenced, converter_report_found=bool(converter_raw))
             df = event_maps.get("order_book_depths", {}).get(iid, [])
             if df and progress_callback: progress_callback("l2", cs, total_steps, f"{iid} L2 sanity check running...")
             l2r = self._run_l2_check(iid, first_n=first_n, random_n=random_n, instrument_type=itype, warnings=warnings) if df else L2CheckResult(present=False)
@@ -646,21 +1161,91 @@ class CatalogScanner:
                 except Exception as exc: warnings.append(self._warning("l2_quality_failed", f"Full L2 quality aggregation failed for {iid}: {exc}"))
                 cs += 1
                 if progress_callback: progress_callback("l2", cs, total_steps, f"{iid} L2 sanity check done.")
+            report_counts, report_quality_issues = self._instrument_report_signal_counts(
+                iid,
+                dtr,
+                report,
+                converter_raw,
+                converter_fenced,
+            )
+            quality_snapshot_count = fq.snapshot_count if fq else l2r.sampled_count
+            quality_bad_snapshot_count = fq.bad_snapshot_count if fq else l2r.bad_count
+            crossed_count = fq.crossed_count if fq else l2r.crossed_count
+            monotonic_violation_count = fq.monotonic_violation_count if fq else l2r.monotonic_violation_count
+            empty_side_count = fq.empty_side_count if fq else l2r.empty_side_count
+            max_gap_seconds = max(readiness.trade_max_gap_seconds or 0, readiness.delta_max_gap_seconds or 0) or None
+            l2_quality_score = compute_l2_quality_score(
+                snapshot_count=quality_snapshot_count or readiness.delta_row_count or readiness.trade_row_count,
+                crossed_count=crossed_count,
+                monotonic_violation_count=monotonic_violation_count,
+                negative_qty_count=fq.negative_qty_count if fq else l2r.negative_qty_count,
+                zero_qty_count=fq.zero_qty_count if fq else l2r.zero_qty_count,
+                empty_side_count=empty_side_count,
+                max_gap_seconds=max_gap_seconds,
+                session_break_count=readiness.session_break_count,
+                desync_count=report_counts["desync_count"],
+                fenced_range_count=report_counts["fenced_range_count"],
+                resync_count=report_counts["resync_count"],
+                bad_lines=report_counts["bad_lines"],
+                missing_symbol_count=report_counts["missing_symbol_count"],
+                partial_unreadable_count=report_counts["partial_unreadable_count"],
+            )
+            audit_confidence_score, audit_confidence_issues = self._compute_audit_confidence(
+                data_type_results=dtr,
+                converter_raw=converter_raw,
+                converter_selected_path=converter_selected_path,
+                converter_report_date=converter_report_date,
+                converter_catalog_matches=converter_matches_catalog,
+                converter_trade_mismatch=converter_trade_mismatch,
+            )
+            l2_quality_issues = list(report_quality_issues)
+            if crossed_count > 0:
+                l2_quality_issues.append(f"{crossed_count} crossed book snapshot(s)")
+            if monotonic_violation_count > 0:
+                l2_quality_issues.append(f"{monotonic_violation_count} monotonic violation(s)")
+            if empty_side_count > 0:
+                l2_quality_issues.append(f"{empty_side_count} empty-side snapshot(s)")
+            if readiness.session_break_count > 0:
+                l2_quality_issues.append(f"{readiness.session_break_count} session break(s)")
+            if max_gap_seconds is not None:
+                l2_quality_issues.append(f"max gap {max_gap_seconds:.1f} seconds")
+            suggestions = []
+            if any(stat.file_count > 0 and stat.status in {"present_unreadable", "present_unknown_rows"} for stat in dtr.values()):
+                suggestions.append("Files found but audit cannot read row counts/timestamps.")
+            if readiness.session_break_count > 0:
+                suggestions.append("Inspect session breaks before replaying this instrument.")
+            if readiness.fenced_range_count > 0:
+                suggestions.append("Review fenced ranges from the converter report.")
+            if report_counts["desync_count"] > 0 or report_counts["resync_count"] > 0:
+                suggestions.append("Check converter resync/desync events for book continuity.")
             results.append(AuditInstrumentResult(
                 instrument_id=iid, instrument_type=itype, data_types=dtr, readiness=readiness, l2_check=l2r,
-                quality_score=fq.quality_score if fq else l2r.quality_score,
-                quality_snapshot_count=fq.snapshot_count if fq else l2r.sampled_count,
-                quality_bad_snapshot_count=fq.bad_snapshot_count if fq else l2r.bad_count,
-                crossed_count=fq.crossed_count if fq else l2r.crossed_count,
-                monotonic_violation_count=fq.monotonic_violation_count if fq else l2r.monotonic_violation_count,
-                empty_side_count=fq.empty_side_count if fq else l2r.empty_side_count,
+                l2_quality_score=l2_quality_score,
+                data_reliability_score=l2_quality_score,
+                audit_confidence_score=audit_confidence_score,
+                l2_quality_issues=l2_quality_issues,
+                audit_confidence_issues=audit_confidence_issues,
+                reliability_suggestions=suggestions,
+                quality_score=l2_quality_score,
+                quality_snapshot_count=quality_snapshot_count,
+                quality_bad_snapshot_count=quality_bad_snapshot_count,
+                crossed_count=crossed_count,
+                monotonic_violation_count=monotonic_violation_count,
+                empty_side_count=empty_side_count,
                 crossed_rate=fq.crossed_rate if fq else 0.0,
                 empty_rate=fq.empty_side_rate if fq else 0.0,
                 session_break_count=readiness.session_break_count,
-                max_gap_seconds=max(readiness.trade_max_gap_seconds or 0, readiness.delta_max_gap_seconds or 0) or None,
+                max_gap_seconds=max_gap_seconds,
                 corrupt=any(s.corrupt for s in dtr.values()) or bool(fq.error if fq else False),
             ))
-        summary = self._build_summary(results, converter_presence=converter_trade_presence if converter_trade_presence else None)
+        summary = self._build_summary(
+            results,
+            converter_presence=converter_trade_presence if converter_trade_presence else None,
+            converter_raw=converter_raw,
+            converter_selected_path=converter_selected_path,
+            converter_report_date=converter_report_date,
+            converter_discovery_warnings=converter_discovery_warnings,
+        )
         if summary.trade_tick_detected_mismatch:
             warnings.append(self._warning(
                 "trade_tick_detected_mismatch",
@@ -744,6 +1329,34 @@ class CatalogScanner:
             e["instrument_id"] for e in instruments if "-PERP." not in e["instrument_id"] and "-SWAP." not in e["instrument_id"]
         ]
         return result
+
+    def debug_parquet(self, *, instrument_id: str, data_type: str) -> dict:
+        """Return per-file parquet metadata/timestamp interpretation for one dataset."""
+        warnings: list[CatalogWarning] = []
+        files = self._event_file_map(data_type, warnings).get(instrument_id, [])
+        stats = self._scan_data_type(data_type, files)
+        per_file = []
+        for file_path in files:
+            info = self._inspect_parquet_file(file_path)
+            info["path"] = str(file_path)
+            info["relative_path"] = _relative_file_label(self.catalog_root, file_path)
+            per_file.append(info)
+        return {
+            "catalog_root": str(self.catalog_root),
+            "instrument_id": instrument_id,
+            "data_type": data_type,
+            "resolved_file_paths": [str(path) for path in files],
+            "files": per_file,
+            "final_status": stats.status,
+            "timestamp_status": stats.timestamp_status,
+            "row_count_estimate": stats.row_count_estimate,
+            "row_count_trusted": stats.row_count_trusted,
+            "row_count_source": stats.row_count_source,
+            "ts_event_min_ns": stats.ts_event_min_ns,
+            "ts_event_max_ns": stats.ts_event_max_ns,
+            "error": stats.error,
+            "warnings": [warning.model_dump(mode="json") for warning in warnings],
+        }
 
     def save_audit_cache(self, audit: AuditResponse, cache_path: Path | str | None = None) -> Path:
         target = Path(cache_path).expanduser().resolve() if cache_path else self.cache_path

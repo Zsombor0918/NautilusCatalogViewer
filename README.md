@@ -36,6 +36,18 @@ CLI audit:
 python -m app audit --catalog /path/to/catalog --out state/audit.json
 ```
 
+Parquet metadata debug:
+
+```bash
+python -m app debug-parquet --catalog /path/to/catalog --instrument BTCUSDT-PERP.BINANCE --data-type order_book_deltas
+```
+
+Optional convert report selection:
+
+```bash
+python -m app audit --catalog /path/to/catalog --convert-report-dir /path/to/convert_reports --convert-report-date 2026-04-25
+```
+
 ## Pages
 
 | Route | Description |
@@ -68,7 +80,7 @@ python -m app audit --catalog /path/to/catalog --out state/audit.json
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/readiness?instrument_id=...` | Readiness assessment: score, fenced ranges, desyncs, backtest-ready flag |
+| `GET` | `/api/readiness?instrument_id=...` | Backtest readiness assessment: data completeness for Nautilus |
 
 ### L2 (optional, depth10 only)
 
@@ -87,29 +99,42 @@ python -m app audit --catalog /path/to/catalog --out state/audit.json
 | `POST` | `/api/audit/run` | Trigger background audit |
 | `GET` | `/api/progress` | Audit progress polling |
 
-## Readiness Model
+## Score Model
 
-Each instrument receives a **readiness score** (0–100) based on:
+The audit exposes three separate scores:
 
-| Component | Weight | Condition |
-|---|---|---|
-| Trade data present | +20 | `trade_tick` directory exists with data |
-| Delta data present | +25 | `order_book_deltas` directory exists |
-| Depth10 data present | +5 | `order_book_depths` (optional bonus) |
-| Trade row volume | +10 | ≥1000 rows |
-| Delta row volume | +10 | ≥1000 rows |
-| No trade gaps | +10 | max gap < 60s |
-| No delta gaps | +10 | max gap < 60s |
-| No fenced ranges | +5 | 0 fenced ranges from report |
-| No desyncs | +5 | 0 desync events from report |
+| Score | Meaning |
+|---|---|
+| `backtest_readiness_score` | Data completeness for Nautilus backtests |
+| `l2_quality_score` / `data_reliability_score` | Crossed books, monotonic violations, quantity issues, gaps, session breaks, fenced ranges, desync/resync signals, bad lines, and missing/partial symbols |
+| `audit_confidence_score` | How much to trust the scan: unreadable row counts, null timestamp bounds, missing/stale convert report, and audit/convert mismatch |
 
-**Penalties** are subtracted for fenced ranges (−3 each), desyncs (−5 each),
-excessive resyncs (−1 per 5), and session breaks (−1 per 3).
+Backtest readiness is intentionally simple:
 
-An instrument is **backtest-ready** when:
-- `readiness_score ≥ 60`
-- `has_trade_tick` and `has_order_book_deltas` are both true
-- `desync_count == 0`
+| Status | Score | Condition |
+|---|---:|---|
+| `full_ready` | 100 | `TradeTick` and `OrderBookDeltas` present |
+| `l2_ready` | 70 | L2 data present without full TradeTick + OrderBookDeltas completeness |
+| `trade_ready` | 60 | `TradeTick` present without L2 data |
+| `partial_unreadable` | 40 | Files exist but row counts/timestamps are unreadable |
+| `not_ready` | 0 | No usable replay data |
+
+An instrument is **backtest-ready** when `TradeTick` and `OrderBookDeltas`
+are both present. Fences, desyncs, gaps and session breaks remain visible under
+reliability issues and lower `l2_quality_score`, not the completeness score.
+
+Each audited data type also has an explicit `status`:
+
+| Status | Meaning |
+|---|---|
+| `absent` | No parquet files found |
+| `present_empty` | Files exist and parquet metadata confirms zero rows |
+| `present_with_rows` | Files exist and parquet metadata reports rows |
+| `present_unreadable` | Files exist but metadata/schema/row scan failed |
+| `present_unknown_rows` | Files exist but row count cannot be trusted |
+
+Timestamp issues are tracked separately with `timestamp_status`, so missing
+timestamp columns no longer erase metadata row counts.
 
 ## Deterministic Report Integration
 
@@ -124,6 +149,20 @@ If the catalog contains a `reports/` directory with per-instrument JSON files
 
 These reports are produced by the deterministic recorder/converter and are
 displayed in the instrument explorer's "Report Context" section.
+
+## Convert Report Discovery
+
+CryptoRecorder convert reports are discovered in this order:
+
+1. Explicit CLI/API argument: `--convert-report-dir`
+2. Environment variable: `NAUTILUS_VIEWER_CONVERT_REPORT_DIR`
+3. Sibling folder of the catalog root: `catalog_root.parent / "convert_reports"`
+4. App-local fallback: `./state/convert_reports`
+
+If no date is specified, the latest `YYYY-MM-DD.json` filename is selected.
+Use `--convert-report-date YYYY-MM-DD` to load a specific report. The audit
+summary exposes the selected report path, date, timestamp, status,
+`catalog_root` match, `report_paths`, and warnings.
 
 ## Debug Bundle Export
 

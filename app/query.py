@@ -12,7 +12,7 @@ import pandas as pd
 import pyarrow.dataset as ds
 
 from .cache import QueryCache, build_cache_key, compute_files_signature
-from .scoring import compute_readiness_breakdown, compute_readiness_score
+from .scoring import compute_readiness_breakdown, compute_readiness_score, readiness_status_for_score
 from .l2_checks import (
     DEPTH_LEVELS,
     compute_gap_entries,
@@ -751,7 +751,7 @@ class CatalogQueryService:
             cov = self._coverage_for_type(data_type="order_book_depths", instrument_id=instrument_id, from_ns=None, to_ns=None)
             depth_row_count = cov.row_count
 
-        # Compute readiness using the same formula as catalog_scan.compute_readiness_score
+        # Compute backtest readiness as data-type completeness only.
         limitations: list[str] = []
         if not has_trade:
             limitations.append("No trade_tick data")
@@ -797,6 +797,8 @@ class CatalogQueryService:
             trade_max_gap_seconds=trade_max_gap,
             delta_max_gap_seconds=delta_max_gap,
             session_break_count=session_break_count,
+            backtest_readiness_score=score,
+            readiness_status=readiness_status_for_score(score),
             readiness_score=score,
             score_breakdown=breakdown,
             limitations=limitations,

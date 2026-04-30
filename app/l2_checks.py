@@ -320,7 +320,7 @@ def estimate_missing_ratio(ts_values: Sequence[int]) -> float:
     return round(min(1.0, missing_ns / duration_ns), 6)
 
 
-def compute_quality_score(
+def compute_l2_quality_score(
     *,
     snapshot_count: int,
     crossed_count: int,
@@ -330,27 +330,55 @@ def compute_quality_score(
     empty_side_count: int,
     max_gap_seconds: float | None,
     session_break_count: int,
+    desync_count: int = 0,
+    fenced_range_count: int = 0,
+    resync_count: int = 0,
+    bad_lines: int = 0,
+    missing_symbol_count: int = 0,
+    partial_unreadable_count: int = 0,
 ) -> float:
+    """Return an L2/data reliability score.
+
+    The base penalty model is the original depth10 quality model:
+    crossed books, monotonic violations, bad quantities, empty sides,
+    max gaps and session breaks. Optional converter-report signals extend
+    the same reliability score when available.
+    """
     if snapshot_count <= 0:
-        return 100.0
+        base_score = 100.0
+    else:
+        crossed_rate = crossed_count / snapshot_count
+        monotonic_rate = monotonic_violation_count / snapshot_count
+        negative_rate = negative_qty_count / snapshot_count
+        zero_rate = zero_qty_count / snapshot_count
+        empty_rate = empty_side_count / snapshot_count
 
-    crossed_rate = crossed_count / snapshot_count
-    monotonic_rate = monotonic_violation_count / snapshot_count
-    negative_rate = negative_qty_count / snapshot_count
-    zero_rate = zero_qty_count / snapshot_count
-    empty_rate = empty_side_count / snapshot_count
+        penalty = (
+            crossed_rate * 70.0
+            + monotonic_rate * 35.0
+            + negative_rate * 25.0
+            + zero_rate * 8.0
+            + empty_rate * 20.0
+        )
+        if max_gap_seconds is not None and max_gap_seconds > 0:
+            penalty += min(20.0, math.log10(max_gap_seconds + 1.0) * 4.0)
+        penalty += min(15.0, session_break_count * 3.0)
+        base_score = 100.0 - penalty
 
-    penalty = (
-        crossed_rate * 70.0
-        + monotonic_rate * 35.0
-        + negative_rate * 25.0
-        + zero_rate * 8.0
-        + empty_rate * 20.0
-    )
-    if max_gap_seconds is not None and max_gap_seconds > 0:
-        penalty += min(20.0, math.log10(max_gap_seconds + 1.0) * 4.0)
-    penalty += min(15.0, session_break_count * 3.0)
-    return round(max(0.0, 100.0 - penalty), 2)
+    converter_penalty = 0.0
+    converter_penalty += min(10.0, desync_count * 2.0)
+    converter_penalty += min(15.0, fenced_range_count * 1.5)
+    converter_penalty += min(5.0, resync_count * 0.5)
+    if bad_lines > 0:
+        converter_penalty += min(10.0, math.log10(bad_lines + 1.0) * 3.0)
+    converter_penalty += min(10.0, missing_symbol_count * 2.0)
+    converter_penalty += min(20.0, partial_unreadable_count * 5.0)
+    return round(max(0.0, base_score - converter_penalty), 2)
+
+
+def compute_quality_score(**kwargs) -> float:
+    """Backward-compatible alias for the L2/data reliability score."""
+    return compute_l2_quality_score(**kwargs)
 
 
 def quality_from_snapshots(
@@ -384,7 +412,7 @@ def quality_from_snapshots(
     if len(ts_values) > 1:
         diffs = np.diff(np.asarray(ts_values, dtype=np.int64))
         session_break_count = int(np.sum(diffs >= threshold_ns))
-    quality_score = compute_quality_score(
+    quality_score = compute_l2_quality_score(
         snapshot_count=snapshot_count,
         crossed_count=crossed_count,
         monotonic_violation_count=monotonic_violation_count,
@@ -414,6 +442,8 @@ def quality_from_snapshots(
         empty_side_rate=(empty_side_count / snapshot_count) if snapshot_count else 0.0,
         bad_snapshot_count=bad_snapshot_count,
         bad_snapshot_rate=(bad_snapshot_count / snapshot_count) if snapshot_count else 0.0,
+        l2_quality_score=quality_score,
+        data_reliability_score=quality_score,
         quality_score=quality_score,
         max_gap_seconds=max_gap_seconds,
         session_break_count=session_break_count,
@@ -469,6 +499,8 @@ def run_l2_checks(
         negative_qty_count=quality.negative_qty_count,
         zero_qty_count=quality.zero_qty_count,
         empty_side_count=quality.empty_side_count,
+        l2_quality_score=quality.l2_quality_score,
+        data_reliability_score=quality.data_reliability_score,
         quality_score=quality.quality_score,
         top_gaps=quality.top_gaps,
         examples=[parsed_to_violation_example(snapshot) for snapshot in parsed_snapshots if snapshot.issues][:example_limit],

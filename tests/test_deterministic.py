@@ -279,7 +279,7 @@ def test_fenced_range_model():
 # ── Tests: Readiness scoring ──────────────────────────────────────────────
 
 def test_readiness_score_full():
-    """Full data availability should yield a high readiness score."""
+    """TradeTick + OrderBookDeltas should be fully backtest ready."""
     score = compute_readiness_score(
         has_trade_tick=True,
         has_order_book_deltas=True,
@@ -293,11 +293,11 @@ def test_readiness_score_full():
         resync_count=0,
         session_break_count=0,
     )
-    assert score >= 70.0  # 20 + 25 + 5 + 10 + 10 = 70 base
+    assert score == 100.0
 
 
 def test_readiness_score_no_deltas():
-    """Missing deltas should significantly lower the score."""
+    """TradeTick only is trade-ready but not full backtest-ready."""
     score = compute_readiness_score(
         has_trade_tick=True,
         has_order_book_deltas=False,
@@ -311,12 +311,11 @@ def test_readiness_score_no_deltas():
         resync_count=0,
         session_break_count=0,
     )
-    # Only trades: 20 + 10 = 30
-    assert score <= 35.0
+    assert score == 60.0
 
 
 def test_readiness_score_with_penalties():
-    """Fenced ranges and desyncs should apply penalties."""
+    """Reliability penalties should not reduce backtest completeness."""
     score = compute_readiness_score(
         has_trade_tick=True,
         has_order_book_deltas=True,
@@ -330,9 +329,7 @@ def test_readiness_score_with_penalties():
         resync_count=10,
         session_break_count=5,
     )
-    # Base 65, minus gap/fenced/desync/resync penalties
-    assert score < 60.0
-    assert score >= 0.0
+    assert score == 100.0
 
 
 def test_readiness_score_empty():
@@ -475,7 +472,7 @@ def test_audit_with_report(catalog_with_report: Path):
     assert r.fenced_range_count == 1
     assert r.desync_count == 1
     assert r.snapshot_seed_count == 3
-    assert r.is_backtest_ready is False  # desync > 0
+    assert r.is_backtest_ready is True  # readiness is completeness; desync affects L2 quality
 
 
 def test_audit_summary_readiness_fields(catalog_with_deltas_only: Path):
@@ -487,6 +484,9 @@ def test_audit_summary_readiness_fields(catalog_with_deltas_only: Path):
     assert hasattr(summary, "backtest_ready_count")
     assert hasattr(summary, "consumable_count")
     assert hasattr(summary, "avg_readiness_score")
+    assert hasattr(summary, "avg_backtest_readiness_score")
+    assert hasattr(summary, "avg_l2_quality_score")
+    assert hasattr(summary, "avg_audit_confidence_score")
     assert hasattr(summary, "total_fenced_range_count")
     assert hasattr(summary, "total_desync_count")
     assert hasattr(summary, "top_readiness_offenders")
@@ -521,6 +521,9 @@ def test_audit_instrument_result_has_both_readiness_and_legacy():
         instrument_type="currency_pair",
     )
     assert hasattr(result, "readiness")
+    assert hasattr(result.readiness, "backtest_readiness_score")
+    assert hasattr(result, "l2_quality_score")
+    assert hasattr(result, "audit_confidence_score")
     assert hasattr(result, "quality_score")
     assert hasattr(result, "l2_check")
     assert result.readiness.readiness_score == 0.0

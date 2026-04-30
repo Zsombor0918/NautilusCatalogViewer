@@ -12,14 +12,14 @@
           Readiness &amp; Integrity Dashboard
         </h1>
         <p class="mt-4 max-w-3xl text-lg text-slate-600">
-          Deterministic readiness assessment, delta coverage, replay integrity and consumer readiness for Nautilus BacktestNode.
+          Backtest readiness: data completeness for Nautilus. L2 quality: crossed/gaps/session-break reliability. Audit confidence: how much we trust the scan.
         </p>
       </div>
       <div class="rounded-[1.75rem] bg-ink p-6 text-white">
         <p class="text-sm uppercase tracking-[0.2em] text-sand">Audit date</p>
         {% if audit %}
         <h2 class="mt-2 text-3xl font-semibold">{{ audit.generated_at }}</h2>
-        <p class="mt-3 text-sm text-slate-200">Avg readiness score: {{ audit.summary.avg_readiness_score|format_float }}</p>
+        <p class="mt-3 text-sm text-slate-200">Backtest readiness: {{ audit.summary.avg_backtest_readiness_score|format_float }}</p>
         {% else %}
         <h2 class="mt-2 text-3xl font-semibold">No audit</h2>
         <p class="mt-3 text-sm text-slate-200">Run the audit from the home page first.</p>
@@ -31,27 +31,66 @@
 
 {% if audit %}
 {# ── Summary cards ──────────────────────────────────────────────────── #}
-<section class="mb-8 grid gap-6 lg:grid-cols-4">
+<section class="mb-8 grid gap-6 lg:grid-cols-3">
   <article class="glass-panel rounded-[1.5rem] px-6 py-5 shadow-panel">
-    <p class="text-sm uppercase tracking-[0.2em] text-sea">Avg readiness score</p>
-    <h3 class="mt-2 text-3xl font-bold text-ink">{{ audit.summary.avg_readiness_score|format_float }}</h3>
-    <p class="mt-2 text-sm text-slate-600">Weighted average across all instruments</p>
+    <p class="text-sm uppercase tracking-[0.2em] text-sea">Backtest readiness</p>
+    <h3 class="mt-2 text-3xl font-bold text-ink">{{ audit.summary.avg_backtest_readiness_score|format_float }}</h3>
+    <p class="mt-2 text-sm text-slate-600">Data completeness for Nautilus</p>
   </article>
+  <article class="glass-panel rounded-[1.5rem] px-6 py-5 shadow-panel">
+    <p class="text-sm uppercase tracking-[0.2em] text-sea">L2 quality</p>
+    <h3 class="mt-2 text-3xl font-bold text-ink">{{ audit.summary.avg_l2_quality_score|format_float }}</h3>
+    <p class="mt-2 text-sm text-slate-600">Crossed/gaps/session-break reliability</p>
+  </article>
+  <article class="glass-panel rounded-[1.5rem] px-6 py-5 shadow-panel">
+    <p class="text-sm uppercase tracking-[0.2em] text-sea">Audit confidence</p>
+    <h3 class="mt-2 text-3xl font-bold text-ink">{{ audit.summary.avg_audit_confidence_score|format_float }}</h3>
+    <p class="mt-2 text-sm text-slate-600">How much we trust the scan</p>
+  </article>
+</section>
+
+<section class="mb-8 grid gap-6 lg:grid-cols-3">
   <article class="glass-panel rounded-[1.5rem] px-6 py-5 shadow-panel">
     <p class="text-sm uppercase tracking-[0.2em] text-sea">Backtest ready</p>
     <h3 class="mt-2 text-3xl font-bold text-ink">{{ audit.summary.backtest_ready_count|format_int }} / {{ audit.summary.instrument_count|format_int }}</h3>
-    <p class="mt-2 text-sm text-slate-600">Instruments ready for BacktestNode</p>
+    <p class="mt-2 text-sm text-slate-600">TradeTick + OrderBookDeltas present</p>
   </article>
   <article class="glass-panel rounded-[1.5rem] px-6 py-5 shadow-panel">
-    <p class="text-sm uppercase tracking-[0.2em] text-sea">Total desync events</p>
+    <p class="text-sm uppercase tracking-[0.2em] text-sea">Desync events</p>
     <h3 class="mt-2 text-3xl font-bold text-ink">{{ audit.summary.total_desync_count|format_int }}</h3>
-    <p class="mt-2 text-sm text-slate-600">Desyncs detected across all instruments</p>
+    <p class="mt-2 text-sm text-slate-600">Reliability issue count from reports</p>
   </article>
   <article class="glass-panel rounded-[1.5rem] px-6 py-5 shadow-panel">
-    <p class="text-sm uppercase tracking-[0.2em] text-sea">Total fenced ranges</p>
+    <p class="text-sm uppercase tracking-[0.2em] text-sea">Fenced ranges</p>
     <h3 class="mt-2 text-3xl font-bold text-ink">{{ audit.summary.total_fenced_range_count|format_int }}</h3>
-    <p class="mt-2 text-sm text-slate-600">Unreliable data intervals fenced off</p>
+    <p class="mt-2 text-sm text-slate-600">Intervals to review before replay</p>
   </article>
+</section>
+
+<section class="mb-8 glass-panel rounded-[1.75rem] px-6 py-6 shadow-panel">
+  <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+    <div>
+      <p class="text-sm uppercase tracking-[0.22em] text-sea">Convert report</p>
+      <h2 class="mt-2 text-2xl font-bold text-ink">{{ "Found" if audit.summary.convert_report_found else "Not found" }}</h2>
+      <p class="mt-2 text-sm text-slate-600">{{ audit.summary.convert_report_path or "No convert report selected." }}</p>
+    </div>
+    <div class="grid gap-2 text-sm text-slate-600 lg:min-w-[360px]">
+      <div>Date: <span class="font-semibold text-ink">{{ audit.summary.convert_report_date or "—" }}</span></div>
+      <div>Status: <span class="font-semibold text-ink">{{ audit.summary.convert_report_status or "—" }}</span></div>
+      <div>Catalog match: <span class="font-semibold text-ink">{{ audit.summary.convert_report_matches_catalog_root }}</span></div>
+      <details class="rounded-xl bg-mist px-4 py-3">
+        <summary class="cursor-pointer font-semibold text-ink">Report paths and warnings</summary>
+        <div class="mt-3 space-y-2">
+          {% for path in audit.summary.convert_report_paths %}
+          <div class="break-all text-xs">{{ path }}</div>
+          {% endfor %}
+          {% for warning in audit.summary.convert_report_warnings %}
+          <div class="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">{{ warning }}</div>
+          {% endfor %}
+        </div>
+      </details>
+    </div>
+  </div>
 </section>
 
 {# ── Top offender panels ───────────────────────────────────────────── #}
@@ -67,7 +106,7 @@
           <div class="mt-1 text-xs text-slate-500">{{ item.limitations|join(', ') }}</div>
         </div>
         <div class="ml-4 shrink-0 text-right">
-          <div class="text-lg font-bold text-coral">{{ item.readiness_score|format_float }}</div>
+          <div class="text-lg font-bold text-coral">{{ item.backtest_readiness_score|format_float }}</div>
         </div>
       </a>
       {% else %}
@@ -130,7 +169,9 @@
         <tr class="text-left text-xs uppercase tracking-[0.18em] text-slate-500">
           <th class="px-4 py-2">Instrument</th>
           <th class="px-4 py-2">Type</th>
-          <th class="px-4 py-2">Readiness score</th>
+          <th class="px-4 py-2">Backtest readiness</th>
+          <th class="px-4 py-2">L2 quality</th>
+          <th class="px-4 py-2">Audit confidence</th>
           <th class="px-4 py-2">Backtest ready</th>
           <th class="px-4 py-2">Has trades</th>
           <th class="px-4 py-2">Has deltas</th>
@@ -139,7 +180,7 @@
           <th class="px-4 py-2">Desync events</th>
           <th class="px-4 py-2">Session breaks</th>
           <th class="px-4 py-2">Max gap</th>
-          <th class="px-4 py-2">Limitations</th>
+          <th class="px-4 py-2">Reliability issues / suggestions</th>
         </tr>
       </thead>
       <tbody>
@@ -158,16 +199,28 @@
             {% endif %}
             <span title="{{ tip.v }}"
                   class="inline-flex cursor-help items-center rounded-full px-3 py-1 text-sm font-semibold
-                  {% if item.readiness.readiness_score >= 80 %}bg-emerald-50 text-emerald-700
-                  {% elif item.readiness.readiness_score >= 50 %}bg-amber-50 text-amber-700
+                  {% if item.readiness.backtest_readiness_score >= 80 %}bg-emerald-50 text-emerald-700
+                  {% elif item.readiness.backtest_readiness_score >= 50 %}bg-amber-50 text-amber-700
                   {% else %}bg-red-50 text-red-700{% endif %}">
-              {{ item.readiness.readiness_score|format_float }}
+              {{ item.readiness.backtest_readiness_score|format_float }}
             </span>
-            {% if item.readiness.score_breakdown %}
-            <div class="mt-1 text-xs tabular-nums">
-              {% for comp in item.readiness.score_breakdown %}{% if comp.positive %}<span class="text-emerald-600">+{{ comp.points | int }}</span>{% else %}<span class="text-rose-500">{{ comp.points | round(1) }}</span>{% endif %}{% if not loop.last %}<span class="text-slate-300"> · </span>{% endif %}{% endfor %}
-            </div>
-            {% endif %}
+            <div class="mt-1 text-xs text-slate-500">{{ item.readiness.readiness_status }}</div>
+          </td>
+          <td class="px-4 py-4">
+            <span class="inline-flex items-center rounded-full px-3 py-1 text-sm font-semibold
+                  {% if item.l2_quality_score >= 80 %}bg-emerald-50 text-emerald-700
+                  {% elif item.l2_quality_score >= 50 %}bg-amber-50 text-amber-700
+                  {% else %}bg-red-50 text-red-700{% endif %}">
+              {{ item.l2_quality_score|format_float }}
+            </span>
+          </td>
+          <td class="px-4 py-4">
+            <span class="inline-flex items-center rounded-full px-3 py-1 text-sm font-semibold
+                  {% if item.audit_confidence_score >= 80 %}bg-emerald-50 text-emerald-700
+                  {% elif item.audit_confidence_score >= 50 %}bg-amber-50 text-amber-700
+                  {% else %}bg-red-50 text-red-700{% endif %}">
+              {{ item.audit_confidence_score|format_float }}
+            </span>
           </td>
           <td class="px-4 py-4">
             {% if item.readiness.is_backtest_ready %}
@@ -202,8 +255,9 @@
           <td class="px-4 py-4 text-slate-700">{{ item.readiness.session_break_count|format_int }}</td>
           <td class="px-4 py-4 text-slate-700">{{ item.max_gap_seconds|format_seconds }}</td>
           <td class="rounded-r-2xl px-4 py-4 text-xs text-slate-500">
-            {% if item.readiness.limitations %}
-            {{ item.readiness.limitations|join(', ') }}
+            {% set issues = item.l2_quality_issues + item.audit_confidence_issues + item.reliability_suggestions %}
+            {% if issues %}
+            {{ issues|join(', ') }}
             {% else %}
             <span class="text-emerald-600">None</span>
             {% endif %}

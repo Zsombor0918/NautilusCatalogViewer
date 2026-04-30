@@ -6,7 +6,6 @@ Kept in a separate module so both :mod:`catalog_scan` (audit path) and
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -20,102 +19,48 @@ def compute_readiness_breakdown(
     has_order_book_depths: bool,
     trade_row_count: int,
     delta_row_count: int,
-    trade_max_gap_seconds: float | None,
-    delta_max_gap_seconds: float | None,
-    fenced_range_count: int,
-    desync_count: int,
-    resync_count: int,
-    session_break_count: int,
+    trade_max_gap_seconds: float | None = None,
+    delta_max_gap_seconds: float | None = None,
+    fenced_range_count: int = 0,
+    desync_count: int = 0,
+    resync_count: int = 0,
+    session_break_count: int = 0,
+    partial_unreadable: bool = False,
 ) -> "tuple[float, list[ScoreComponent]]":
-    """Return ``(final_score, breakdown)`` — every scored bonus and penalty.
+    """Return ``(backtest_readiness_score, breakdown)``.
 
-    Scoring table
-    ─────────────
-    trade_tick present          +20
-    order_book_deltas present   +25
-    order_book_depths present    +5
-    trade rows > 1 000          +10  (> 0 but ≤ 1 000: +5)
-    delta rows > 1 000          +10  (> 0 but ≤ 1 000: +5)
-
-    Penalties (all capped)
-    ──────────────────────
-    trade gap (log-scaled)      up to −7.5
-    delta gap (log-scaled)      up to −7.5
-    fenced ranges               −2 each, max −10
-    desync events               −1 each, max −5
-    resync events               −0.5 each, max −5
-    session breaks              −0.5 each, max −5
+    Backtest readiness is intentionally only data-type completeness:
+    full_ready=100, l2_ready=70, trade_ready=60, partial_unreadable=40,
+    not_ready=0. Reliability penalties live in the L2 quality score.
+    Extra parameters are accepted for backward-compatible call sites.
     """
     from .models import ScoreComponent  # local import avoids circular dep at module load
 
     components: list[ScoreComponent] = []
 
-    if has_trade_tick:
-        components.append(ScoreComponent(label="trade_tick present", points=20.0, detail="", positive=True))
-    if has_order_book_deltas:
-        components.append(ScoreComponent(label="order_book_deltas present", points=25.0, detail="", positive=True))
+    if partial_unreadable:
+        components.append(ScoreComponent(label="partial/unreadable data", points=40.0, detail="files present but scan confidence is limited", positive=True))
+        return 40.0, components
+
+    if has_trade_tick and has_order_book_deltas:
+        components.append(ScoreComponent(label="TradeTick + OrderBookDeltas", points=100.0, detail="full Nautilus backtest data completeness", positive=True))
+        if has_order_book_depths:
+            components.append(ScoreComponent(label="OrderBookDepth10 present", points=0.0, detail="optional inspection data", positive=True))
+        return 100.0, components
+
     if has_order_book_depths:
-        components.append(ScoreComponent(label="order_book_depths present", points=5.0, detail="optional bonus", positive=True))
+        components.append(ScoreComponent(label="OrderBookDepth10 present", points=70.0, detail="L2 snapshots available without TradeTick + OrderBookDeltas completeness", positive=True))
+        return 70.0, components
 
-    if trade_row_count > 1000:
-        components.append(ScoreComponent(label="trade rows \u2265 1\u202f000", points=10.0, detail=f"{trade_row_count:,} rows", positive=True))
-    elif trade_row_count > 0:
-        components.append(ScoreComponent(label="trade rows > 0", points=5.0, detail=f"{trade_row_count:,} rows", positive=True))
+    if has_order_book_deltas:
+        components.append(ScoreComponent(label="OrderBookDeltas present", points=70.0, detail="L2-ready, missing TradeTick for full backtest readiness", positive=True))
+        return 70.0, components
 
-    if delta_row_count > 1000:
-        components.append(ScoreComponent(label="delta rows \u2265 1\u202f000", points=10.0, detail=f"{delta_row_count:,} rows", positive=True))
-    elif delta_row_count > 0:
-        components.append(ScoreComponent(label="delta rows > 0", points=5.0, detail=f"{delta_row_count:,} rows", positive=True))
+    if has_trade_tick:
+        components.append(ScoreComponent(label="TradeTick present", points=60.0, detail="trade-ready, missing L2 data for full backtest readiness", positive=True))
+        return 60.0, components
 
-    for label_prefix, gap_sec in (("trade", trade_max_gap_seconds), ("delta", delta_max_gap_seconds)):
-        if gap_sec is not None and gap_sec > 0:
-            penalty = round(min(7.5, math.log10(gap_sec + 1.0) * 2.5), 2)
-            components.append(ScoreComponent(
-                label=f"{label_prefix} gap penalty",
-                points=-penalty,
-                detail=f"max gap {gap_sec:,.1f} s",
-                positive=False,
-            ))
-
-    if fenced_range_count > 0:
-        penalty = round(min(10.0, fenced_range_count * 2.0), 2)
-        components.append(ScoreComponent(
-            label="fenced ranges",
-            points=-penalty,
-            detail=f"{fenced_range_count} range(s), \u22122 each (cap \u221210)",
-            positive=False,
-        ))
-
-    if desync_count > 0:
-        penalty = round(min(5.0, desync_count * 1.0), 2)
-        components.append(ScoreComponent(
-            label="desync events",
-            points=-penalty,
-            detail=f"{desync_count} event(s), \u22121 each (cap \u22125)",
-            positive=False,
-        ))
-
-    if resync_count > 0:
-        penalty = round(min(5.0, resync_count * 0.5), 2)
-        components.append(ScoreComponent(
-            label="resync events",
-            points=-penalty,
-            detail=f"{resync_count} event(s), \u22120.5 each (cap \u22125)",
-            positive=False,
-        ))
-
-    if session_break_count > 0:
-        penalty = round(min(5.0, session_break_count * 0.5), 2)
-        components.append(ScoreComponent(
-            label="session breaks",
-            points=-penalty,
-            detail=f"{session_break_count} break(s), \u22120.5 each (cap \u22125)",
-            positive=False,
-        ))
-
-    raw = sum(c.points for c in components)
-    final = round(max(0.0, min(100.0, raw)), 2)
-    return final, components
+    return 0.0, components
 
 
 def compute_readiness_score(
@@ -125,12 +70,13 @@ def compute_readiness_score(
     has_order_book_depths: bool,
     trade_row_count: int,
     delta_row_count: int,
-    trade_max_gap_seconds: float | None,
-    delta_max_gap_seconds: float | None,
-    fenced_range_count: int,
-    desync_count: int,
-    resync_count: int,
-    session_break_count: int,
+    trade_max_gap_seconds: float | None = None,
+    delta_max_gap_seconds: float | None = None,
+    fenced_range_count: int = 0,
+    desync_count: int = 0,
+    resync_count: int = 0,
+    session_break_count: int = 0,
+    partial_unreadable: bool = False,
 ) -> float:
     """Convenience wrapper — returns only the final score."""
     score, _ = compute_readiness_breakdown(
@@ -145,5 +91,18 @@ def compute_readiness_score(
         desync_count=desync_count,
         resync_count=resync_count,
         session_break_count=session_break_count,
+        partial_unreadable=partial_unreadable,
     )
     return score
+
+
+def readiness_status_for_score(score: float) -> str:
+    if score >= 100.0:
+        return "full_ready"
+    if score >= 70.0:
+        return "l2_ready"
+    if score >= 60.0:
+        return "trade_ready"
+    if score >= 40.0:
+        return "partial_unreadable"
+    return "not_ready"

@@ -81,6 +81,7 @@ class InstrumentTypeSummary(StrictModel):
 class InstrumentCoverage(StrictModel):
     data_type: str
     present: bool = False
+    status: str = "absent"
     file_count: int = 0
     row_count_estimate: int = 0
     ts_event_min_ns: int | None = None
@@ -149,7 +150,10 @@ class ReadinessResult(StrictModel):
     resync_count: int = 0
     desync_count: int = 0
     snapshot_seed_count: int = 0
-    # Readiness score (0-100, deterministic-first)
+    # Backtest readiness is data-type completeness for Nautilus backtests.
+    backtest_readiness_score: float = 0.0
+    readiness_status: Literal["full_ready", "l2_ready", "trade_ready", "partial_unreadable", "not_ready"] = "not_ready"
+    # Backward-compatible alias for older clients/templates.
     readiness_score: float = 0.0
     score_breakdown: list[ScoreComponent] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
@@ -169,6 +173,10 @@ class ReadinessResponse(StrictModel):
 class DataTypeAuditStats(StrictModel):
     data_type: str
     present: bool = False
+    status: Literal["absent", "present_empty", "present_with_rows", "present_unreadable", "present_unknown_rows"] = "absent"
+    timestamp_status: str = "not_checked"
+    row_count_trusted: bool = True
+    row_count_source: str = "metadata"
     file_count: int = 0
     row_count_estimate: int = 0
     ts_event_min_ns: int | None = None
@@ -210,6 +218,8 @@ class L2CheckResult(StrictModel):
     negative_qty_count: int = 0
     zero_qty_count: int = 0
     empty_side_count: int = 0
+    l2_quality_score: float = 100.0
+    data_reliability_score: float = 100.0
     quality_score: float = 100.0
     top_gaps: list[GapEntry] = Field(default_factory=list)
     examples: list[L2ViolationExample] = Field(default_factory=list)
@@ -224,7 +234,13 @@ class AuditInstrumentResult(StrictModel):
     readiness: ReadinessResult = Field(default_factory=ReadinessResult)
     # Optional L2 check (secondary — only when depth10 is present)
     l2_check: L2CheckResult = Field(default_factory=L2CheckResult)
-    # Legacy quality fields (demoted, derived from L2 when present)
+    # L2/data reliability fields. ``quality_score`` is retained as a legacy alias.
+    l2_quality_score: float = 100.0
+    data_reliability_score: float = 100.0
+    audit_confidence_score: float = 100.0
+    l2_quality_issues: list[str] = Field(default_factory=list)
+    audit_confidence_issues: list[str] = Field(default_factory=list)
+    reliability_suggestions: list[str] = Field(default_factory=list)
     quality_score: float = 100.0
     quality_snapshot_count: int = 0
     quality_bad_snapshot_count: int = 0
@@ -249,7 +265,11 @@ class ReadinessOffenderItem(StrictModel):
     """Readiness-context offender item (primary)."""
     instrument_id: str
     instrument_type: str
+    backtest_readiness_score: float = 0.0
+    readiness_status: str = "not_ready"
     readiness_score: float = 0.0
+    l2_quality_score: float = 100.0
+    audit_confidence_score: float = 100.0
     has_trade_tick: bool = False
     has_order_book_deltas: bool = False
     has_order_book_depths: bool = False
@@ -265,6 +285,7 @@ class QualityOffenderItem(StrictModel):
     """Legacy L2 quality offender (demoted, kept for optional depth10)."""
     instrument_id: str
     instrument_type: str
+    l2_quality_score: float = 100.0
     quality_score: float = 100.0
     max_gap_seconds: float | None = None
     crossed_rate: float = 0.0
@@ -280,7 +301,10 @@ class AuditSummary(StrictModel):
     # Deterministic-first readiness summary (primary)
     backtest_ready_count: int = 0
     consumable_count: int = 0
+    avg_backtest_readiness_score: float = 0.0
     avg_readiness_score: float = 0.0
+    avg_l2_quality_score: float = 100.0
+    avg_audit_confidence_score: float = 100.0
     total_fenced_range_count: int = 0
     total_desync_count: int = 0
     total_resync_count: int = 0
@@ -306,6 +330,16 @@ class AuditSummary(StrictModel):
     viewer_trade_tick_instrument_count: int | None = None
     trade_tick_detected_mismatch: bool = False
     trade_tick_no_data_list: list[str] = Field(default_factory=list)  # instruments converter says have no trade data
+    # Selected converter report metadata.
+    convert_report_found: bool = False
+    convert_report_path: str | None = None
+    convert_report_date: str | None = None
+    convert_report_timestamp: str | None = None
+    convert_report_status: str | None = None
+    convert_report_catalog_root: str | None = None
+    convert_report_matches_catalog_root: bool | None = None
+    convert_report_paths: list[str] = Field(default_factory=list)
+    convert_report_warnings: list[str] = Field(default_factory=list)
 
 
 class AuditResponse(StrictModel):
@@ -581,6 +615,8 @@ class L2QualityResponse(StrictModel):
     empty_side_rate: float = 0.0
     bad_snapshot_count: int = 0
     bad_snapshot_rate: float = 0.0
+    l2_quality_score: float = 100.0
+    data_reliability_score: float = 100.0
     quality_score: float = 100.0
     max_gap_seconds: float | None = None
     session_break_count: int = 0

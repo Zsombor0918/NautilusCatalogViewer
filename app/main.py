@@ -33,11 +33,12 @@ from .query import CatalogQueryService
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CATALOG_ROOT = Path(
-    os.getenv("NAUTILUS_CATALOG_ROOT", "/home/z0055upd/Project/nautilus_data/catalog"),
+    os.getenv("NAUTILUS_CATALOG_ROOT", "/home/zsomb/nautilus_data/catalog"),
 ).expanduser()
 DEFAULT_CACHE_PATH = PROJECT_ROOT / "state" / "web_audit_cache.json"
-_converter_env = os.getenv("NAUTILUS_CONVERTER_REPORTS_DIR")
+_converter_env = os.getenv("NAUTILUS_VIEWER_CONVERT_REPORT_DIR") or os.getenv("NAUTILUS_CONVERTER_REPORTS_DIR")
 DEFAULT_CONVERTER_REPORTS_DIR: Path | None = Path(_converter_env).expanduser() if _converter_env else None
+DEFAULT_CONVERT_REPORT_DATE: str | None = os.getenv("NAUTILUS_VIEWER_CONVERT_REPORT_DATE")
 TEMPLATES = Jinja2Templates(directory=str(PROJECT_ROOT / "templates"))
 
 
@@ -222,9 +223,10 @@ def create_app(
     catalog_root: Path | str = DEFAULT_CATALOG_ROOT,
     cache_path: Path | str = DEFAULT_CACHE_PATH,
     converter_reports_dir: Path | str | None = DEFAULT_CONVERTER_REPORTS_DIR,
+    convert_report_date: str | None = DEFAULT_CONVERT_REPORT_DATE,
 ) -> FastAPI:
     app = FastAPI(title="Nautilus Catalog Viewer", version="0.3.0", docs_url="/docs", redoc_url="/redoc")
-    scanner = CatalogScanner(catalog_root=catalog_root, cache_path=cache_path, converter_reports_dir=converter_reports_dir)
+    scanner = CatalogScanner(catalog_root=catalog_root, cache_path=cache_path, converter_reports_dir=converter_reports_dir, convert_report_date=convert_report_date)
     query_service: CatalogQueryService = scanner.query_service
     runtime = RuntimeState()
     runtime.latest_audit = scanner.load_audit_cache()
@@ -306,6 +308,7 @@ def create_app(
             readiness = query_service.get_readiness(instrument_id).readiness
         except Exception:
             pass
+        audit_item = next((item for item in audit.instruments if item.instrument_id == instrument_id), None) if audit else None
         try:
             deltas_summary = query_service.get_deltas_summary(instrument_id)
         except Exception:
@@ -322,6 +325,7 @@ def create_app(
                 "default_to_iso": default_to_iso,
                 "inventory_payload": inventory_payload,
                 "readiness": readiness,
+                "audit_item": audit_item,
                 "deltas_summary": deltas_summary,
             },
         )

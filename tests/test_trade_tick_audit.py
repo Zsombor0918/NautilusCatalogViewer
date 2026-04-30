@@ -379,6 +379,36 @@ def test_converter_no_report_no_mismatch_field(catalog_spot_with_trades: Path) -
     assert audit.summary.converter_trade_tick_instrument_count is None
 
 
+def test_converter_report_sibling_discovery(tmp_path: Path) -> None:
+    """Viewer should discover catalog_root.parent/convert_reports/YYYY-MM-DD.json."""
+    root = tmp_path / "nautilus_data" / "catalog"
+    iid = "BTCUSDT.BINANCE"
+    _write_trade_parquet(root / "data" / "trade_tick" / iid / "part-0.parquet", [_ts(0), _ts(1)])
+    _write_delta_parquet(root / "data" / "order_book_deltas" / iid / "part-0.parquet", [_ts(0)])
+    (root / "data" / "currency_pair" / iid).mkdir(parents=True, exist_ok=True)
+
+    report_dir = root.parent / "convert_reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / "2026-04-25.json"
+    report_path.write_text(json.dumps({
+        "date": "2026-04-25",
+        "timestamp": "2026-04-25T12:00:00Z",
+        "status": "ok",
+        "catalog_root": str(root),
+        "report_paths": [str(report_path)],
+        "data_presence": {"instruments_with_trades": 1, "no_data_list": []},
+        "per_symbol_fenced_ranges": {},
+    }), encoding="utf-8")
+
+    audit = CatalogScanner(root, convert_report_date="2026-04-25").run_audit()
+
+    assert audit.summary.convert_report_found is True
+    assert audit.summary.convert_report_path == str(report_path)
+    assert audit.summary.convert_report_date == "2026-04-25"
+    assert audit.summary.convert_report_status == "ok"
+    assert audit.summary.convert_report_matches_catalog_root is True
+
+
 # ── Tests: 9. debug_trade_tick() ─────────────────────────────────────────────
 
 def test_debug_trade_tick_spot_found(catalog_spot_with_trades: Path) -> None:
@@ -461,3 +491,126 @@ def test_audit_summary_trade_tick_viewer_count(catalog_mixed: Path) -> None:
     # Only SOLUSDT.BINANCE has trades, SOLUSDT-PERP.BINANCE does not
     assert audit.summary.viewer_trade_tick_instrument_count == 1
     assert audit.summary.data_type_coverage["trade_tick"] == 1
+
+
+def test_metadata_rows_without_timestamp_stats(tmp_path: Path) -> None:
+    """metadata.num_rows must be counted even when row-group timestamp stats are absent."""
+    root = tmp_path / "catalog"
+    iid = "STATLESS.BINANCE"
+    parquet_path = root / "data" / "trade_tick" / iid / "part-0.parquet"
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.table({
+            "ts_event": pa.array([_ts(0), _ts(1), _ts(2)], type=pa.int64()),
+            "price": pa.array([b"\x00" * 16] * 3, type=pa.binary()),
+        }),
+        str(parquet_path),
+        write_statistics=False,
+    )
+    (root / "data" / "currency_pair" / iid).mkdir(parents=True, exist_ok=True)
+
+    audit = CatalogScanner(root).run_audit()
+    stat = next(i for i in audit.instruments if i.instrument_id == iid).data_types["trade_tick"]
+
+    assert stat.present is True
+    assert stat.status == "present_with_rows"
+    assert stat.row_count_estimate == 3
+    assert stat.timestamp_status == "fallback_read"
+    assert stat.ts_event_min_ns == _ts(0)
+
+
+def test_files_with_unsupported_timestamp_column_are_not_absent(tmp_path: Path) -> None:
+    """Files with rows but no known timestamp column keep row counts and explicit timestamp status."""
+    root = tmp_path / "catalog"
+    iid = "NOTS.BINANCE"
+    parquet_path = root / "data" / "trade_tick" / iid / "part-0.parquet"
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.table({"sequence": pa.array([1, 2, 3], type=pa.int64())}), str(parquet_path))
+    (root / "data" / "currency_pair" / iid).mkdir(parents=True, exist_ok=True)
+
+    audit = CatalogScanner(root).run_audit()
+    stat = next(i for i in audit.instruments if i.instrument_id == iid).data_types["trade_tick"]
+
+    assert stat.present is True
+    assert stat.status == "present_with_rows"
+    assert stat.row_count_estimate == 3
+    assert stat.timestamp_status == "missing_timestamp_column"
+    assert stat.ts_event_min_ns is None
+
+
+def test_file_count_with_scan_failure_becomes_present_unreadable(tmp_path: Path) -> None:
+    """A parquet-looking file that cannot be read is explicit unreadable, not clean empty."""
+    root = tmp_path / "catalog"
+    iid = "BROKEN.BINANCE"
+    parquet_path = root / "data" / "trade_tick" / iid / "part-0.parquet"
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    parquet_path.write_bytes(b"not a parquet file")
+    (root / "data" / "currency_pair" / iid).mkdir(parents=True, exist_ok=True)
+
+    audit = CatalogScanner(root).run_audit()
+    stat = next(i for i in audit.instruments if i.instrument_id == iid).data_types["trade_tick"]
+
+    assert stat.present is True
+    assert stat.file_count == 1
+    assert stat.status == "present_unreadable"
+    assert stat.row_count_estimate == 0
+    assert stat.error is not None
+
+
+def test_order_book_deltas_included_in_readiness(catalog_perp_no_trades: Path) -> None:
+    """Deltas-only instruments should be L2-ready instead of not-ready."""
+    audit = CatalogScanner(catalog_perp_no_trades).run_audit()
+    inst = next(i for i in audit.instruments if i.instrument_id == "ETHUSDT-PERP.BINANCE")
+
+    assert inst.readiness.has_order_book_deltas is True
+    assert inst.readiness.backtest_readiness_score == 70.0
+    assert inst.readiness.readiness_status == "l2_ready"
+
+
+def test_convert_report_overrides_audit_uncertainty_with_warning(tmp_path: Path) -> None:
+    """Convert rows can classify readiness while audit mismatch lowers confidence."""
+    root = tmp_path / "nautilus_data" / "catalog"
+    iid = "OVERRIDE.BINANCE"
+    for data_type in ("trade_tick", "order_book_deltas"):
+        parquet_path = root / "data" / data_type / iid / "part-0.parquet"
+        parquet_path.parent.mkdir(parents=True, exist_ok=True)
+        parquet_path.write_bytes(b"not a parquet file")
+    (root / "data" / "currency_pair" / iid).mkdir(parents=True, exist_ok=True)
+    report_dir = root.parent / "convert_reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "2026-04-25.json").write_text(json.dumps({
+        "date": "2026-04-25",
+        "status": "ok",
+        "catalog_root": str(root),
+        "per_symbol_trade": {iid: {"ticks_written": 10}},
+        "per_symbol_depth": {iid: {"deltas_written": 20}},
+    }), encoding="utf-8")
+
+    audit = CatalogScanner(root, convert_report_date="2026-04-25").run_audit()
+    inst = next(i for i in audit.instruments if i.instrument_id == iid)
+
+    assert inst.data_types["trade_tick"].status == "present_unreadable"
+    assert inst.data_types["trade_tick"].row_count_source == "convert_report"
+    assert inst.data_types["order_book_deltas"].row_count_estimate == 20
+    assert inst.readiness.backtest_readiness_score == 100.0
+    assert inst.audit_confidence_score < 100.0
+    assert any(w.code == "convert_report_audit_mismatch" for w in audit.warnings)
+
+
+def test_zero_rows_without_error_only_when_metadata_confirms_empty(tmp_path: Path) -> None:
+    """No present file may report zero rows and no error unless parquet metadata confirms empty."""
+    root = tmp_path / "catalog"
+    iid = "EMPTY.BINANCE"
+    parquet_path = root / "data" / "trade_tick" / iid / "part-0.parquet"
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.table({"ts_event": pa.array([], type=pa.int64())}), str(parquet_path))
+    (root / "data" / "currency_pair" / iid).mkdir(parents=True, exist_ok=True)
+
+    audit = CatalogScanner(root).run_audit()
+    stat = next(i for i in audit.instruments if i.instrument_id == iid).data_types["trade_tick"]
+
+    assert stat.present is True
+    assert stat.file_count == 1
+    assert stat.row_count_estimate == 0
+    assert stat.status == "present_empty"
+    assert stat.error is None
