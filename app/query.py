@@ -12,7 +12,7 @@ import pandas as pd
 import pyarrow.dataset as ds
 
 from .cache import QueryCache, build_cache_key, compute_files_signature
-from .scoring import compute_readiness_breakdown, compute_readiness_score, readiness_status_for_score
+from .scoring import compute_readiness_breakdown, compute_readiness_score, readiness_status_for_score, readiness_status_for_presence
 from .l2_checks import (
     DEPTH_LEVELS,
     compute_gap_entries,
@@ -30,6 +30,7 @@ from .models import (
     DeltaSeriesPoint,
     DeltasResponse,
     DeltasSummaryResponse,
+    Depth10DebugResponse,
     InstrumentSearchItem,
     InstrumentSearchResponse,
     L2QualityResponse,
@@ -154,6 +155,27 @@ class CatalogQueryService:
             if optional_name in schema_names:
                 columns.append(optional_name)
         return columns
+
+    def _expected_depth_columns(self) -> list[str]:
+        """Return the full list of expected flat depth10 column names."""
+        cols: list[str] = []
+        for prefix in ("bid_price_", "ask_price_", "bid_size_", "ask_size_"):
+            for level in range(DEPTH_LEVELS):
+                cols.append(f"{prefix}{level}")
+        return cols
+
+    def _depth_schema_error(self, schema_names: list[str], *, files: list[Path]) -> str:
+        """Build a descriptive error message when no depth columns are found."""
+        expected = self._expected_depth_columns()
+        missing = [c for c in expected if c not in schema_names]
+        first_file = str(files[0]) if files else "(unknown)"
+        return (
+            f"Depth10 parser: no bid/ask level columns found in parquet schema. "
+            f"File: {first_file}. "
+            f"Schema columns: {schema_names}. "
+            f"Expected flat columns (sample): {expected[:8]}... "
+            f"Missing: {len(missing)}/{len(expected)} expected columns."
+        )
 
     # ── Instrument search ───────────────────────────────────────────────────
 
@@ -761,7 +783,8 @@ class CatalogQueryService:
             limitations.append("No optional order_book_depths (depth10)")
 
         is_consumable = has_trade or has_deltas
-        is_backtest_ready = has_trade and has_deltas and delta_row_count > 0
+        is_backtest_ready = has_trade and has_deltas and trade_row_count > 0 and delta_row_count > 0
+        depth10_inspection_ready = has_depths and depth_row_count > 0
 
         # Note: fenced_range_count / desync_count / resync_count are not available
         # without loading per-instrument report files. Pass 0 so the live-API score
@@ -772,6 +795,7 @@ class CatalogQueryService:
             has_order_book_depths=has_depths,
             trade_row_count=trade_row_count,
             delta_row_count=delta_row_count,
+            depth_row_count=depth_row_count,
             trade_max_gap_seconds=trade_max_gap,
             delta_max_gap_seconds=delta_max_gap,
             fenced_range_count=0,
@@ -789,6 +813,7 @@ class CatalogQueryService:
             delta_first_only=delta_first_only,
             is_consumable=is_consumable,
             is_backtest_ready=is_backtest_ready,
+            depth10_inspection_ready=depth10_inspection_ready,
             trade_row_count=trade_row_count,
             delta_row_count=delta_row_count,
             depth_row_count=depth_row_count,
@@ -798,7 +823,12 @@ class CatalogQueryService:
             delta_max_gap_seconds=delta_max_gap,
             session_break_count=session_break_count,
             backtest_readiness_score=score,
-            readiness_status=readiness_status_for_score(score),
+            readiness_status=readiness_status_for_presence(
+                has_trade_rows=has_trade and trade_row_count > 0,
+                has_delta_rows=has_deltas and delta_row_count > 0,
+                has_depth_rows=has_depths and depth_row_count > 0,
+                partial_unreadable=False,
+            ),
             readiness_score=score,
             score_breakdown=breakdown,
             limitations=limitations,
@@ -848,7 +878,14 @@ class CatalogQueryService:
 
         try:
             ts_field = self._resolve_ts_field(dataset.schema.names)
-            columns = [ts_field] + self._resolve_depth_columns(dataset.schema.names)
+            depth_cols = self._resolve_depth_columns(dataset.schema.names)
+            # If no depth columns found, the parquet schema doesn't match the expected
+            # flat layout. Return a structured, visible error instead of silently
+            # decoding zeros.
+            if not depth_cols:
+                files = self.list_files("order_book_depths", instrument_id)
+                return [], self._depth_schema_error(dataset.schema.names, files=files)
+            columns = [ts_field] + depth_cols
             table = dataset.to_table(columns=columns, filter=_time_filter(ts_field, from_ns, to_ns))
         except Exception as exc:
             return [], str(exc)
@@ -1149,6 +1186,92 @@ class CatalogQueryService:
         )
         self.cache.set_model(key, signature, response)
         return response
+
+    # ── Depth10 debug ────────────────────────────────────────────────────────
+
+    def debug_depth10(self, instrument_id: str) -> Depth10DebugResponse:
+        """Return schema diagnostics for the order_book_depths parquet files."""
+        files = self.list_files("order_book_depths", instrument_id)
+        generated_at = utc_now_iso()
+        expected = self._expected_depth_columns()
+
+        if not files:
+            return Depth10DebugResponse(
+                instrument_id=instrument_id,
+                files=[],
+                parser_ok=False,
+                parser_error="No order_book_depths parquet files found.",
+                expected_flat_cols=expected,
+                generated_at=generated_at,
+            )
+
+        first_file = files[0]
+        schema_names: list[str] = []
+        ts_field: str | None = None
+        depth_cols: list[str] = []
+        missing_cols: list[str] = []
+        first_raw_row: dict | None = None
+        first_decoded: dict | None = None
+        parser_ok = False
+        parser_error: str | None = None
+        row_count = 0
+
+        try:
+            dataset = ds.dataset([str(f) for f in files], format="parquet")
+            schema_names = list(dataset.schema.names)
+            row_count = dataset.count_rows()
+            ts_field = self._resolve_ts_field(schema_names)
+            depth_cols = self._resolve_depth_columns(schema_names)
+            missing_cols = [c for c in expected if c not in schema_names]
+
+            if not depth_cols:
+                parser_error = self._depth_schema_error(schema_names, files=files)
+            else:
+                # Read one row to show the raw + decoded values
+                try:
+                    sample = dataset.to_table(
+                        columns=[ts_field] + depth_cols[:8],  # first 2 levels, all 4 prefixes
+                        filter=None,
+                    ).slice(0, 1)
+                    if sample.num_rows:
+                        first_raw_row = {k: repr(v[0]) for k, v in sample.to_pydict().items()}
+                        # Decode the values to show what the parser would produce
+                        row_dict = {k: v[0] for k, v in sample.to_pydict().items()}
+                        decoded: dict[str, float] = {}
+                        for col in depth_cols[:8]:
+                            decoded[col] = decode_fixed_decimal(row_dict.get(col, 0))
+                        first_decoded = decoded
+                        # Quick validation: check if we get non-zero prices
+                        prices = [decoded[c] for c in decoded if "price" in c]
+                        if any(p > 0 for p in prices):
+                            parser_ok = True
+                        else:
+                            parser_error = (
+                                "All decoded price values are zero. "
+                                "The column names match, but the fixed-decimal values may not decode correctly. "
+                                f"Raw sample: {first_raw_row}"
+                            )
+                except Exception as exc:
+                    parser_error = f"Row sample read failed: {exc}"
+        except Exception as exc:
+            parser_error = f"Dataset open failed: {exc}"
+
+        return Depth10DebugResponse(
+            instrument_id=instrument_id,
+            files=[str(f) for f in files],
+            first_file=str(first_file),
+            schema_names=schema_names,
+            ts_field=ts_field,
+            depth_cols_found=depth_cols,
+            expected_flat_cols=expected,
+            missing_flat_cols=missing_cols,
+            first_raw_row=first_raw_row,
+            first_decoded_snapshot=first_decoded,
+            parser_ok=parser_ok,
+            parser_error=parser_error,
+            row_count=row_count,
+            generated_at=generated_at,
+        )
 
     # ── Export ───────────────────────────────────────────────────────────────
 

@@ -9,6 +9,21 @@ from .catalog_scan import CatalogScanner
 from .main import DEFAULT_CACHE_PATH, DEFAULT_CATALOG_ROOT, DEFAULT_CONVERTER_REPORTS_DIR, create_app
 
 
+def _catalog_path(value: str) -> Path:
+    """Argparse type for --catalog: expand user, resolve, and validate exists."""
+    p = Path(value).expanduser().resolve()
+    if not p.exists():
+        raw = Path(value)
+        if not raw.is_absolute():
+            raise argparse.ArgumentTypeError(
+                f"Catalog path does not exist: {p}\n"
+                f"  The path '{value}' is relative — did you forget the leading '/'?\n"
+                f"  Try: --catalog /{value}"
+            )
+        raise argparse.ArgumentTypeError(f"Catalog path does not exist: {p}")
+    return p
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m app",
@@ -19,14 +34,14 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser = subparsers.add_parser("serve", help="Start FastAPI web app.")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8000)
-    serve_parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_ROOT)
+    serve_parser.add_argument("--catalog", type=_catalog_path, default=DEFAULT_CATALOG_ROOT)
     serve_parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE_PATH)
     serve_parser.add_argument("--convert-report-dir", "--converter-reports", type=Path, default=DEFAULT_CONVERTER_REPORTS_DIR, dest="converter_reports",
                               help="Path to convert reports directory (contains YYYY-MM-DD.json files).")
     serve_parser.add_argument("--convert-report-date", default=None, help="Specific convert report date to load, e.g. 2026-04-25.")
 
     audit_parser = subparsers.add_parser("audit", help="Run CLI audit.")
-    audit_parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_ROOT)
+    audit_parser.add_argument("--catalog", type=_catalog_path, default=DEFAULT_CATALOG_ROOT)
     audit_parser.add_argument("--out", type=Path, default=Path("state/audit.json"))
     audit_parser.add_argument("--convert-report-dir", "--converter-reports", type=Path, default=DEFAULT_CONVERTER_REPORTS_DIR, dest="converter_reports",
                               help="Path to convert reports directory (contains YYYY-MM-DD.json files).")
@@ -41,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     debug_parser = subparsers.add_parser("debug-parquet", help="Inspect parquet metadata for one instrument/data type.")
-    debug_parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_ROOT)
+    debug_parser.add_argument("--catalog", type=_catalog_path, default=DEFAULT_CATALOG_ROOT)
     debug_parser.add_argument("--instrument", required=True)
     debug_parser.add_argument("--data-type", required=True, choices=("trade_tick", "order_book_deltas", "order_book_depths"))
 

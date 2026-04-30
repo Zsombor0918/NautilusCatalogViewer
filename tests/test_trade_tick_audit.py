@@ -564,7 +564,7 @@ def test_order_book_deltas_included_in_readiness(catalog_perp_no_trades: Path) -
 
     assert inst.readiness.has_order_book_deltas is True
     assert inst.readiness.backtest_readiness_score == 70.0
-    assert inst.readiness.readiness_status == "l2_ready"
+    assert inst.readiness.readiness_status == "l2_replay_ready"
 
 
 def test_convert_report_overrides_audit_uncertainty_with_warning(tmp_path: Path) -> None:

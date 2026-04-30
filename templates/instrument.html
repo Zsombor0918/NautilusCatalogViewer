@@ -141,6 +141,9 @@
         {% if readiness.is_backtest_ready %}bg-emerald-100 text-emerald-700{% else %}bg-amber-100 text-amber-700{% endif %}">
         {% if readiness.is_backtest_ready %}Backtest ready{% else %}Not ready{% endif %}
       </span>
+      <span class="rounded-full px-3 py-1 text-xs font-medium bg-slate-100 text-slate-500" title="Data source for fenced ranges, resync counts">
+        {{ readiness_source if readiness_source is defined else 'catalog scan' }}
+      </span>
       {% endif %}
     </div>
 
@@ -162,8 +165,11 @@
         <div class="mt-1 text-xs text-slate-500">How much we trust the scan</div>
       </div>
       <div class="rounded-2xl bg-mist px-4 py-3">
-        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">is_backtest_ready</div>
-        <div class="mt-2 text-sm font-semibold {% if readiness.is_backtest_ready %}text-emerald-600{% else %}text-coral{% endif %}">{{ readiness.is_backtest_ready }}</div>
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">readiness status</div>
+        <div class="mt-2 text-sm font-semibold text-ink">
+          {% set status_map = {'full_ready': 'Full ready', 'l2_replay_ready': 'L2 replay ready', 'trade_only': 'Trade only', 'depth10_inspection_only': 'Depth10 inspection only', 'partial_unreadable': 'Partial / unreadable', 'not_ready': 'Not ready', 'l2_ready': 'L2 ready (legacy)', 'trade_ready': 'Trade ready (legacy)'} %}
+          {{ status_map.get(readiness.readiness_status, readiness.readiness_status) }}
+        </div>
       </div>
     </div>
     <div class="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -547,7 +553,7 @@
      ═══════════════════════════════════════════════════════════════════ */
   const inventory = JSON.parse(document.getElementById('inventory-data').textContent || '[]');
   const initialInstrumentId = '{{ instrument.instrument_id }}';
-  const hasDepth10 = {{ 'true' if has_depth10 else 'false' }};
+  let hasDepth10 = {{ 'true' if has_depth10 else 'false' }};
 
   const fromInput = document.getElementById('from-input');
   const toInput = document.getElementById('to-input');
@@ -567,6 +573,34 @@
   const exportL2Link = document.getElementById('export-l2-link');
   const exportBundleLink = document.getElementById('export-bundle-link');
   let currentSnapshotIndex = null;
+
+  /* ═══════════════════════════════════════════════════════════════════
+     NUMBER FORMATTERS
+     ═══════════════════════════════════════════════════════════════════ */
+  function formatPrice(v) {
+    if (v === null || v === undefined || isNaN(v)) return '—';
+    const abs = Math.abs(v);
+    const dp = abs >= 1000 ? 2 : abs >= 1 ? 4 : abs >= 0.01 ? 6 : 8;
+    return Number(v).toFixed(dp);
+  }
+  function formatQty(v) {
+    if (v === null || v === undefined || isNaN(v)) return '—';
+    return parseFloat(Number(v).toFixed(8)).toString();
+  }
+  function formatSeconds(v) {
+    if (v === null || v === undefined || isNaN(v)) return '—';
+    if (v < 1) return `${(v * 1000).toFixed(1)} ms`;
+    if (v >= 60) { const m = Math.floor(v / 60); const s = (v % 60).toFixed(0); return `${m}m ${s}s`; }
+    return `${v.toFixed(2)} s`;
+  }
+  function formatPercent(v) {
+    if (v === null || v === undefined || isNaN(v)) return '—';
+    return `${(v * 100).toFixed(2)}%`;
+  }
+  function formatCount(v) {
+    if (v === null || v === undefined) return '—';
+    return Number(v).toLocaleString();
+  }
 
   /* ═══════════════════════════════════════════════════════════════════
      HELPERS
@@ -631,7 +665,7 @@
   /* ═══════════════════════════════════════════════════════════════════
      COVERAGE
      ═══════════════════════════════════════════════════════════════════ */
-  function renderCoverage(targetId, badgeId, summary) {
+  function renderCoverage(targetId, badgeId, summary, dataType) {
     const target = document.getElementById(targetId);
     const badge = document.getElementById(badgeId);
     if (!target || !badge) return;
@@ -641,7 +675,19 @@
       return;
     }
 
-    badge.textContent = `${summary.row_count} rows`;
+    badge.textContent = `${formatCount(summary.row_count)} rows`;
+    // Only show missing ratio for order_book_depths (periodic snapshots).
+    // For trade_tick and order_book_deltas it is event-driven and the ratio is misleading.
+    const showMissingRatio = dataType === 'order_book_depths';
+    const missingTile = showMissingRatio
+      ? `<div class="rounded-2xl bg-mist px-4 py-3">
+          <div class="text-xs uppercase tracking-[0.18em] text-slate-500">missing ratio est.</div>
+          <div class="mt-2 text-sm font-semibold text-ink">${formatPercent(summary.missing_ratio_estimate)}</div>
+        </div>`
+      : `<div class="rounded-2xl bg-mist px-4 py-3">
+          <div class="text-xs uppercase tracking-[0.18em] text-slate-500">row count</div>
+          <div class="mt-2 text-sm font-semibold text-ink">${formatCount(summary.row_count)}</div>
+        </div>`;
     target.innerHTML = `
       <div class="rounded-2xl bg-mist px-4 py-3">
         <div class="text-xs uppercase tracking-[0.18em] text-slate-500">ts_event range</div>
@@ -649,12 +695,9 @@
       </div>
       <div class="rounded-2xl bg-mist px-4 py-3">
         <div class="text-xs uppercase tracking-[0.18em] text-slate-500">max gap</div>
-        <div class="mt-2 text-sm font-semibold text-ink">${summary.max_gap_seconds ? `${summary.max_gap_seconds.toFixed(3)} s` : '\u2014'}</div>
+        <div class="mt-2 text-sm font-semibold text-ink">${summary.max_gap_seconds != null ? formatSeconds(summary.max_gap_seconds) : '\u2014'}</div>
       </div>
-      <div class="rounded-2xl bg-mist px-4 py-3">
-        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">missing ratio est.</div>
-        <div class="mt-2 text-sm font-semibold text-ink">${(summary.missing_ratio_estimate * 100).toFixed(2)}%</div>
-      </div>
+      ${missingTile}
       <div class="rounded-2xl bg-mist px-4 py-3">
         <div class="text-xs uppercase tracking-[0.18em] text-slate-500">session breaks</div>
         <div class="mt-2 text-sm font-semibold text-ink">${summary.session_break_count}</div>
@@ -665,13 +708,22 @@
   async function loadCoverage() {
     const params = currentRangeParams();
     const coverage = await fetchJson('/api/coverage', params);
-    renderCoverage('trade-coverage', 'trade-coverage-badge', coverage.coverage.trade_tick);
-    renderCoverage('delta-coverage', 'delta-coverage-badge', coverage.coverage.order_book_deltas);
-    renderCoverage('depth-coverage', 'depth-coverage-badge', coverage.coverage.order_book_depths);
+    renderCoverage('trade-coverage', 'trade-coverage-badge', coverage.coverage.trade_tick, 'trade_tick');
+    renderCoverage('delta-coverage', 'delta-coverage-badge', coverage.coverage.order_book_deltas, 'order_book_deltas');
+    renderCoverage('depth-coverage', 'depth-coverage-badge', coverage.coverage.order_book_depths, 'order_book_depths');
 
     // Update depth10 availability from live API
-    const depthPresent = coverage.coverage.order_book_depths && coverage.coverage.order_book_depths.present;
+    const depthPresent = coverage.coverage.order_book_depths && coverage.coverage.order_book_depths.present
+      && (coverage.coverage.order_book_depths.row_count || 0) > 0;
+    const wasPresent = hasDepth10;
+    hasDepth10 = depthPresent;
     toggleDepth10Sections(depthPresent);
+    // If depth10 became available after load, kick off the depth10 fetches
+    if (!wasPresent && depthPresent) {
+      loadL2Timeseries();
+      loadQuality();
+      loadSnapshot({ ts: normalizeDatetimeLocal(toInput.value || fromInput.value) || undefined });
+    }
   }
 
   function toggleDepth10Sections(depthPresent) {
@@ -867,6 +919,19 @@
     const priceChart = document.getElementById('depth-price-chart');
     const updateChart = document.getElementById('depth-update-chart');
     const status = document.getElementById('depth-status');
+
+    // Show parser error prominently instead of silently showing empty chart
+    if (raw.error) {
+      status.textContent = 'parser error';
+      const errorHtml = `<div class="mt-6 rounded-2xl bg-rose-50 px-5 py-4 text-sm text-rose-700">
+        <strong>Depth10 parser error:</strong> ${raw.error}
+        <div class="mt-2 text-xs text-rose-500">Use <a href="/api/debug/depth10?instrument_id=${encodeURIComponent(currentInstrumentId())}" target="_blank" class="underline">GET /api/debug/depth10</a> to inspect the parquet schema.</div>
+      </div>`;
+      priceChart.innerHTML = errorHtml;
+      updateChart.innerHTML = '';
+      return;
+    }
+
     status.textContent = `${raw.returned_points}/${raw.total_rows} raw points`;
 
     if (!raw.points.length) {
@@ -979,22 +1044,22 @@
     summary.innerHTML = `
       <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">index</div><div class="mt-2 text-sm font-semibold text-ink">${snapshot.index}</div></div>
       <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">ts_event</div><div class="mt-2 text-sm font-semibold text-ink">${snapshot.ts_event_iso}</div></div>
-      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">spread</div><div class="mt-2 text-sm font-semibold text-ink">${snapshot.spread ?? '\u2014'}</div></div>
+      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">spread</div><div class="mt-2 text-sm font-semibold text-ink">${snapshot.spread != null ? formatPrice(snapshot.spread) : '\u2014'}</div></div>
       <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">issues</div><div class="mt-2 text-sm font-semibold text-ink">${snapshot.issues.join(', ') || 'none'}</div></div>
     `;
 
     bidBody.innerHTML = snapshot.bids.map((level) => `
       <tr class="border-t border-slate-100">
         <td class="px-3 py-2">${level.level}</td>
-        <td class="px-3 py-2">${level.price}</td>
-        <td class="px-3 py-2">${level.size}</td>
+        <td class="px-3 py-2 tabular-nums">${formatPrice(level.price)}</td>
+        <td class="px-3 py-2 tabular-nums">${formatQty(level.size)}</td>
       </tr>
     `).join('');
     askBody.innerHTML = snapshot.asks.map((level) => `
       <tr class="border-t border-slate-100">
         <td class="px-3 py-2">${level.level}</td>
-        <td class="px-3 py-2">${level.price}</td>
-        <td class="px-3 py-2">${level.size}</td>
+        <td class="px-3 py-2 tabular-nums">${formatPrice(level.price)}</td>
+        <td class="px-3 py-2 tabular-nums">${formatQty(level.size)}</td>
       </tr>
     `).join('');
 
@@ -1041,12 +1106,21 @@
     const gaps = document.getElementById('quality-gaps');
     const issues = document.getElementById('quality-issues');
     const status = document.getElementById('quality-status');
+
+    if (quality.error) {
+      status.textContent = 'error';
+      cards.innerHTML = `<div class="col-span-2 rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">
+        <strong>Quality parser error:</strong> ${quality.error}
+      </div>`;
+      return;
+    }
+
     status.textContent = `${quality.bad_snapshot_count}/${quality.snapshot_count} bad snapshots`;
 
     cards.innerHTML = `
       <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">l2 quality score</div><div class="mt-2 text-sm font-semibold text-ink">${quality.l2_quality_score ?? quality.quality_score}</div></div>
-      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">crossed rate</div><div class="mt-2 text-sm font-semibold text-ink">${(quality.crossed_rate * 100).toFixed(2)}%</div></div>
-      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">empty rate</div><div class="mt-2 text-sm font-semibold text-ink">${(quality.empty_side_rate * 100).toFixed(2)}%</div></div>
+      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">crossed rate</div><div class="mt-2 text-sm font-semibold text-ink">${formatPercent(quality.crossed_rate)}</div></div>
+      <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">empty rate</div><div class="mt-2 text-sm font-semibold text-ink">${formatPercent(quality.empty_side_rate)}</div></div>
       <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">session breaks</div><div class="mt-2 text-sm font-semibold text-ink">${quality.session_break_count}</div></div>
       <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">monotonic violations</div><div class="mt-2 text-sm font-semibold text-ink">${quality.monotonic_violation_count}</div></div>
       <div class="rounded-2xl bg-mist px-4 py-3"><div class="text-xs uppercase tracking-[0.18em] text-slate-500">negative / zero qty</div><div class="mt-2 text-sm font-semibold text-ink">${quality.negative_qty_count} / ${quality.zero_qty_count}</div></div>
@@ -1054,8 +1128,8 @@
 
     gaps.innerHTML = quality.top_gaps.map((gap) => `
       <div class="rounded-2xl bg-white px-4 py-3 shadow-sm">
-        <div class="text-sm font-semibold text-ink">${gap.gap_seconds.toFixed(3)} s ${gap.is_session_break ? '<span class="text-coral">(session break)</span>' : ''}</div>
-        <div class="mt-1 text-xs text-slate-500">${gap.previous_ts_event_iso} -> ${gap.next_ts_event_iso}</div>
+        <div class="text-sm font-semibold text-ink">${formatSeconds(gap.gap_seconds)} ${gap.is_session_break ? '<span class="text-coral">(session break)</span>' : ''}</div>
+        <div class="mt-1 text-xs text-slate-500">${gap.previous_ts_event_iso} → ${gap.next_ts_event_iso}</div>
       </div>
     `).join('') || '<div class="rounded-2xl bg-mist px-4 py-3 text-sm text-slate-600">No outlier gaps.</div>';
 

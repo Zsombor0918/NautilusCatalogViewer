@@ -91,7 +91,7 @@ def _dedupe_warnings(warnings: list[CatalogWarning]) -> list[CatalogWarning]:
     return unique
 
 
-from .scoring import compute_readiness_breakdown, compute_readiness_score, readiness_status_for_score
+from .scoring import compute_readiness_breakdown, compute_readiness_score, readiness_status_for_score, readiness_status_for_presence
 
 
 def _converter_key_to_instrument_id(key: str) -> str:
@@ -304,9 +304,30 @@ def _converter_row_count_for_instrument(raw: dict, instrument_id: str, data_type
 
 
 def _converter_readiness_classification(raw: dict, instrument_id: str) -> str | None:
+    """Extract the converter's readiness classification for an instrument.
+
+    Supports three formats:
+    A) grouped-list: {"full_ready": ["ZECUSDT.BINANCE", ...], "l2_ready": [...]})
+    B) direct map:  {"ZECUSDT.BINANCE": "full_ready"}
+    C) dict value:  {"ZECUSDT.BINANCE": {"status": "full_ready"}}
+    """
     section = raw.get("readiness_classification")
     if not isinstance(section, dict):
         return None
+
+    # Detect grouped-list format: values are lists of instrument IDs
+    first_value = next(iter(section.values())) if section else None
+    if isinstance(first_value, list):
+        # Invert: {status: [id, ...]} -> {id: status}
+        for status, ids in section.items():
+            if isinstance(ids, list):
+                for raw_id in ids:
+                    normalized = _normalize_report_symbol(str(raw_id))
+                    if normalized == instrument_id or str(raw_id) == instrument_id:
+                        return str(status)
+        return None
+
+    # Direct map or dict-value format
     value = section.get(instrument_id)
     if value is None:
         for key, candidate in section.items():
@@ -421,7 +442,17 @@ class CatalogScanner:
         converter_reports_dir: Path | str | None = None,
         convert_report_date: str | None = None,
     ) -> None:
-        self.catalog_root = Path(catalog_root).expanduser().resolve()
+        _raw = Path(catalog_root)
+        if not _raw.expanduser().is_absolute():
+            import warnings as _w
+            _w.warn(
+                f"catalog_root '{catalog_root}' is a relative path and will be resolved against "
+                f"the current working directory ({Path.cwd()}). "
+                f"Pass an absolute path (starting with '/') to avoid this.",
+                UserWarning,
+                stacklevel=2,
+            )
+        self.catalog_root = _raw.expanduser().resolve()
         project_root = Path(__file__).resolve().parent.parent
         default_cache = project_root / "state" / "web_audit_cache.json"
         self.cache_path = Path(cache_path).expanduser().resolve() if cache_path else default_cache
@@ -502,7 +533,14 @@ class CatalogScanner:
     def _collect_catalog_state(self) -> tuple[dict[str, str], dict[str, dict[str, list[Path]]], list[CatalogWarning]]:
         warnings: list[CatalogWarning] = []
         if not self.catalog_root.exists():
-            warnings.append(self._warning("missing_catalog_root", "Catalog root does not exist.", self.catalog_root))
+            _cwd = Path.cwd()
+            _hint = (
+                f" Hint: path appears to have been resolved relative to CWD ({_cwd}); "
+                "did you forget the leading '/' in your --catalog argument?"
+                if self.catalog_root.is_relative_to(_cwd)
+                else ""
+            )
+            warnings.append(self._warning("missing_catalog_root", f"Catalog root does not exist.{_hint}", self.catalog_root))
         if not self.data_root.exists():
             warnings.append(self._warning("missing_data_root", "Catalog data directory does not exist.", self.data_root))
         instrument_index = self._load_instrument_index(warnings)
@@ -922,19 +960,28 @@ class CatalogScanner:
         if report.desync_count > 0: lims.append(f"{report.desync_count} desync event(s)")
         if report.resync_count > 5: lims.append(f"High resync count ({report.resync_count})")
         ic = ht or hd
-        ibr = ht and hd and not partial_unreadable
         rs, breakdown = compute_readiness_breakdown(
             has_trade_tick=ht, has_order_book_deltas=hd, has_order_book_depths=hdp,
             trade_row_count=ts.row_count_estimate, delta_row_count=ds.row_count_estimate,
+            depth_row_count=dps.row_count_estimate,
             trade_max_gap_seconds=ts.max_gap_seconds, delta_max_gap_seconds=ds.max_gap_seconds,
             fenced_range_count=fenced_count, desync_count=report.desync_count,
             resync_count=report.resync_count, session_break_count=sbc,
+            partial_unreadable=partial_unreadable,
+        )
+        depth10_inspection_ready = hdp and dps.row_count_estimate > 0
+        ibr = ht and hd and ts.row_count_estimate > 0 and ds.row_count_estimate > 0 and not partial_unreadable
+        readiness_status = readiness_status_for_presence(
+            has_trade_rows=ht and ts.row_count_estimate > 0,
+            has_delta_rows=hd and ds.row_count_estimate > 0,
+            has_depth_rows=hdp and dps.row_count_estimate > 0,
             partial_unreadable=partial_unreadable,
         )
         return ReadinessResult(
             instrument_id=instrument_id, instrument_type=instrument_type,
             has_trade_tick=ht, has_order_book_deltas=hd, has_order_book_depths=hdp,
             delta_first_only=dfo, is_consumable=ic, is_backtest_ready=ibr,
+            depth10_inspection_ready=depth10_inspection_ready,
             trade_row_count=ts.row_count_estimate, delta_row_count=ds.row_count_estimate,
             depth_row_count=dps.row_count_estimate, trade_duration_seconds=ts.duration_seconds,
             delta_duration_seconds=ds.duration_seconds, trade_max_gap_seconds=ts.max_gap_seconds,
@@ -944,7 +991,7 @@ class CatalogScanner:
             resync_count=report.resync_count, desync_count=report.desync_count,
             snapshot_seed_count=report.snapshot_seed_count,
             backtest_readiness_score=rs,
-            readiness_status=readiness_status_for_score(rs),
+            readiness_status=readiness_status,
             readiness_score=rs,
             score_breakdown=breakdown, limitations=lims, report=report,
         )

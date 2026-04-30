@@ -122,8 +122,14 @@ def _evaluate_levels(
         descending=False,
     )
     has_negative_qty = any(size < 0 for size in bid_sizes + ask_sizes)
-    has_zero_qty = any(size == 0 for size in bid_sizes + ask_sizes)
-    has_empty_side = not _positive_side(active_bids) or not _positive_side(active_asks)
+    # Only flag zero_qty when a level has a valid price but zero size.
+    # Padding entries (price=0, size=0) must not be counted.
+    has_zero_qty = any(price > 0 and size == 0 for price, size in bid_levels + ask_levels)
+    # Empty side requires at least one level with price > 0 AND size > 0 on each side.
+    has_empty_side = (
+        not any(price > 0 and size > 0 for price, size in active_bids)
+        or not any(price > 0 and size > 0 for price, size in active_asks)
+    )
 
     issues: list[str] = []
     if is_crossed:

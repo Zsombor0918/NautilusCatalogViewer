@@ -150,14 +150,44 @@ class ReadinessResult(StrictModel):
     resync_count: int = 0
     desync_count: int = 0
     snapshot_seed_count: int = 0
+    # Depth10 visual inspection ready (optional; does not affect backtest readiness)
+    depth10_inspection_ready: bool = False
     # Backtest readiness is data-type completeness for Nautilus backtests.
     backtest_readiness_score: float = 0.0
-    readiness_status: Literal["full_ready", "l2_ready", "trade_ready", "partial_unreadable", "not_ready"] = "not_ready"
+    readiness_status: Literal[
+        "full_ready",
+        "l2_replay_ready",
+        "trade_only",
+        "depth10_inspection_only",
+        "partial_unreadable",
+        "not_ready",
+        # legacy aliases kept for cached audit compatibility
+        "l2_ready",
+        "trade_ready",
+    ] = "not_ready"
     # Backward-compatible alias for older clients/templates.
     readiness_score: float = 0.0
     score_breakdown: list[ScoreComponent] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     report: ReportContext = Field(default_factory=ReportContext)
+
+
+class Depth10DebugResponse(StrictModel):
+    """Debug information for the order_book_depths parser."""
+    instrument_id: str
+    files: list[str] = Field(default_factory=list)
+    first_file: str | None = None
+    schema_names: list[str] = Field(default_factory=list)
+    ts_field: str | None = None
+    depth_cols_found: list[str] = Field(default_factory=list)
+    expected_flat_cols: list[str] = Field(default_factory=list)
+    missing_flat_cols: list[str] = Field(default_factory=list)
+    first_raw_row: dict | None = None
+    first_decoded_snapshot: dict | None = None
+    parser_ok: bool = False
+    parser_error: str | None = None
+    row_count: int = 0
+    generated_at: str = ""
 
 
 class ReadinessResponse(StrictModel):

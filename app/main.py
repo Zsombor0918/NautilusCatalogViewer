@@ -18,6 +18,7 @@ from .models import (
     CoverageResponse,
     DeltasResponse,
     DeltasSummaryResponse,
+    Depth10DebugResponse,
     InstrumentSearchResponse,
     InventoryResponse,
     L2QualityResponse,
@@ -314,6 +315,25 @@ def create_app(
         except Exception:
             pass
 
+        # Build a merged display_readiness: live readiness for scores/row counts,
+        # audit_item.readiness for converter-report fields (fenced ranges, resync, etc.).
+        # This eliminates the contradiction where live scores show 0 fenced ranges
+        # while audit suggestions show e.g. 3 fenced ranges from the converter report.
+        display_readiness = readiness
+        readiness_source = "catalog scan"
+        if audit_item and audit_item.readiness.instrument_id:
+            ar = audit_item.readiness
+            merged = readiness.model_dump()
+            merged["fenced_range_count"] = ar.fenced_range_count if ar.converter_report_found else readiness.fenced_range_count
+            merged["fenced_ranges_by_reason"] = ar.fenced_ranges_by_reason or readiness.fenced_ranges_by_reason
+            merged["resync_count"] = ar.resync_count if ar.converter_report_found else readiness.resync_count
+            merged["desync_count"] = ar.desync_count if ar.converter_report_found else readiness.desync_count
+            merged["snapshot_seed_count"] = ar.snapshot_seed_count if ar.converter_report_found else readiness.snapshot_seed_count
+            merged["converter_report_found"] = ar.converter_report_found or readiness.converter_report_found
+            merged["report"] = (ar.report if ar.report.report_found else readiness.report).model_dump()
+            display_readiness = ReadinessResult(**merged)
+            readiness_source = "converter report" if ar.converter_report_found else "catalog scan"
+
         return TEMPLATES.TemplateResponse(
             request=request,
             name="instrument.html",
@@ -324,7 +344,8 @@ def create_app(
                 "default_from_iso": default_from_iso,
                 "default_to_iso": default_to_iso,
                 "inventory_payload": inventory_payload,
-                "readiness": readiness,
+                "readiness": display_readiness,
+                "readiness_source": readiness_source,
                 "audit_item": audit_item,
                 "deltas_summary": deltas_summary,
             },
@@ -489,6 +510,10 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/debug/depth10", response_model=Depth10DebugResponse)
+    async def debug_depth10_api(instrument_id: str) -> Depth10DebugResponse:
+        return app.state.query_service.debug_depth10(instrument_id)
 
     @app.get("/api/export")
     async def export_api(
