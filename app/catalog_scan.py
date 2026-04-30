@@ -865,7 +865,7 @@ class CatalogScanner:
         if not metadata_failed and rc == 0 and all_metadata_empty:
             errs = [err for err in errs if "Timestamp column not found" not in err]
         dur = (max_ts - min_ts) / 1e9 if min_ts is not None and max_ts is not None else None
-        return DataTypeAuditStats(data_type=data_type, present=True, status=status, timestamp_status=timestamp_status, row_count_trusted=row_count_trusted, row_count_source="metadata" if row_count_trusted else "unknown", file_count=len(files), row_count_estimate=rc, ts_event_min_ns=min_ts, ts_event_min_iso=_ns_to_iso(min_ts), ts_event_max_ns=max_ts, ts_event_max_iso=_ns_to_iso(max_ts), duration_seconds=dur, max_gap_ns=gaps[0].gap_ns if gaps else None, max_gap_seconds=gaps[0].gap_seconds if gaps else None, missing_ratio_estimate=mr, session_break_count=sbc, top_gaps=gaps, corrupt=status == "present_unreadable", error="; ".join(errs) if errs else None)
+        return DataTypeAuditStats(data_type=data_type, present=True, status=status, timestamp_status=timestamp_status, row_count_trusted=row_count_trusted, row_count_source="metadata" if row_count_trusted else "unknown", file_count=len(files), row_count_estimate=rc, ts_event_min_ns=min_ts, ts_event_min_iso=_ns_to_iso(min_ts), ts_event_max_ns=max_ts, ts_event_max_iso=_ns_to_iso(max_ts), duration_seconds=dur, max_gap_ns=gaps[0].gap_ns if gaps else None, max_gap_seconds=gaps[0].gap_seconds if gaps else None, missing_ratio_estimate=mr, session_break_count=sbc, top_gaps=gaps, corrupt=status == "present_unreadable" or timestamp_status == "missing_timestamp_column", error="; ".join(errs) if errs else None)
 
     def _apply_convert_report_cross_checks(
         self,

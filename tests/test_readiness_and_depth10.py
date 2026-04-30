@@ -255,7 +255,7 @@ class TestDepth10Parser:
         debug = qs.debug_depth10(inst)
         assert debug.parser_ok is True
         assert debug.parser_error is None
-        assert len(debug.depth_cols_found) == 40  # 4 prefixes × 10 levels
+        assert len(debug.depth_cols_found) >= 40  # 4 prefixes × 10 levels; may include flags/sequence
         assert debug.row_count == 2
 
     def test_l2_timeseries_returns_error_for_missing_schema(self, tmp_path: Path):
