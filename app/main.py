@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -13,6 +12,13 @@ from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
 from .catalog_scan import CatalogScanner
+from .config import (
+    DEFAULT_CACHE_PATH,
+    DEFAULT_CATALOG_ROOT,
+    DEFAULT_CONVERT_REPORT_DATE,
+    DEFAULT_CONVERTER_REPORTS_DIR,
+    PROJECT_ROOT,
+)
 from .models import (
     AuditResponse,
     CoverageResponse,
@@ -32,14 +38,6 @@ from .models import (
 from .query import CatalogQueryService
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CATALOG_ROOT = Path(
-    os.getenv("NAUTILUS_CATALOG_ROOT", "/home/zsomb/nautilus_data/catalog"),
-).expanduser()
-DEFAULT_CACHE_PATH = PROJECT_ROOT / "state" / "web_audit_cache.json"
-_converter_env = os.getenv("NAUTILUS_VIEWER_CONVERT_REPORT_DIR") or os.getenv("NAUTILUS_CONVERTER_REPORTS_DIR")
-DEFAULT_CONVERTER_REPORTS_DIR: Path | None = Path(_converter_env).expanduser() if _converter_env else None
-DEFAULT_CONVERT_REPORT_DATE: str | None = os.getenv("NAUTILUS_VIEWER_CONVERT_REPORT_DATE")
 TEMPLATES = Jinja2Templates(directory=str(PROJECT_ROOT / "templates"))
 
 

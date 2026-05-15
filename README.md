@@ -16,7 +16,8 @@ lets you verify that the catalog is replay-ready before feeding it to Nautilus.
 ## Installation
 
 ```bash
-pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
 Optional: `nautilus_trader>=1.225` is used for `ParquetDataCatalog`-based
@@ -24,29 +25,45 @@ instrument listing when available. All core queries use `pyarrow.dataset`.
 
 ## Running
 
-Web UI:
+The repo includes a local config at `config/viewer.env` pointing at:
 
 ```bash
-python -m app serve --host 127.0.0.1 --port 8000 --catalog /path/to/catalog
+NAUTILUS_CATALOG_ROOT=/home/zsom/sync/catalog
+NAUTILUS_VIEWER_CONVERT_REPORT_DIR=/home/zsom/sync/convert_reports
+```
+
+Web UI with the configured catalog:
+
+```bash
+.venv/bin/python main.py
+```
+
+The package entrypoint uses the same defaults:
+
+```bash
+.venv/bin/python -m app serve
 ```
 
 CLI audit:
 
 ```bash
-python -m app audit --catalog /path/to/catalog --out state/audit.json
+.venv/bin/python -m app audit --out state/audit.json
 ```
 
 Parquet metadata debug:
 
 ```bash
-python -m app debug-parquet --catalog /path/to/catalog --instrument BTCUSDT-PERP.BINANCE --data-type order_book_deltas
+.venv/bin/python -m app debug-parquet --catalog /path/to/catalog --instrument BTCUSDT-PERP.BINANCE --data-type order_book_deltas
 ```
 
 Optional convert report selection:
 
 ```bash
-python -m app audit --catalog /path/to/catalog --convert-report-dir /path/to/convert_reports --convert-report-date 2026-04-25
+.venv/bin/python -m app audit --catalog /path/to/catalog --convert-report-dir /path/to/convert_reports --convert-report-date 2026-04-25
 ```
+
+To use a different config file, set `NAUTILUS_VIEWER_CONFIG=/path/to/viewer.env`
+before launching the app.
 
 ## Pages
 
@@ -188,7 +205,8 @@ containing:
 ## Testing
 
 ```bash
-pytest tests/ -v
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pytest tests/ -v
 ```
 
 ## Architecture Notes

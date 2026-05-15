@@ -6,7 +6,14 @@ from pathlib import Path
 import uvicorn
 
 from .catalog_scan import CatalogScanner
-from .main import DEFAULT_CACHE_PATH, DEFAULT_CATALOG_ROOT, DEFAULT_CONVERTER_REPORTS_DIR, create_app
+from .config import DEFAULT_HOST, DEFAULT_PORT
+from .main import (
+    DEFAULT_CACHE_PATH,
+    DEFAULT_CATALOG_ROOT,
+    DEFAULT_CONVERT_REPORT_DATE,
+    DEFAULT_CONVERTER_REPORTS_DIR,
+    create_app,
+)
 
 
 def _catalog_path(value: str) -> Path:
@@ -32,20 +39,20 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     serve_parser = subparsers.add_parser("serve", help="Start FastAPI web app.")
-    serve_parser.add_argument("--host", default="127.0.0.1")
-    serve_parser.add_argument("--port", type=int, default=8000)
+    serve_parser.add_argument("--host", default=DEFAULT_HOST)
+    serve_parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     serve_parser.add_argument("--catalog", type=_catalog_path, default=DEFAULT_CATALOG_ROOT)
     serve_parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE_PATH)
     serve_parser.add_argument("--convert-report-dir", "--converter-reports", type=Path, default=DEFAULT_CONVERTER_REPORTS_DIR, dest="converter_reports",
                               help="Path to convert reports directory (contains YYYY-MM-DD.json files).")
-    serve_parser.add_argument("--convert-report-date", default=None, help="Specific convert report date to load, e.g. 2026-04-25.")
+    serve_parser.add_argument("--convert-report-date", default=DEFAULT_CONVERT_REPORT_DATE, help="Specific convert report date to load, e.g. 2026-04-25.")
 
     audit_parser = subparsers.add_parser("audit", help="Run CLI audit.")
     audit_parser.add_argument("--catalog", type=_catalog_path, default=DEFAULT_CATALOG_ROOT)
     audit_parser.add_argument("--out", type=Path, default=Path("state/audit.json"))
     audit_parser.add_argument("--convert-report-dir", "--converter-reports", type=Path, default=DEFAULT_CONVERTER_REPORTS_DIR, dest="converter_reports",
                               help="Path to convert reports directory (contains YYYY-MM-DD.json files).")
-    audit_parser.add_argument("--convert-report-date", default=None, help="Specific convert report date to load, e.g. 2026-04-25.")
+    audit_parser.add_argument("--convert-report-date", default=DEFAULT_CONVERT_REPORT_DATE, help="Specific convert report date to load, e.g. 2026-04-25.")
     audit_parser.add_argument(
         "--first-n", type=int, default=10,
         help="Sample first N depth snapshots.",
