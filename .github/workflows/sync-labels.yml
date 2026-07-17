@@ -1,0 +1,30 @@
+name: Standardize repository labels
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/sync-labels.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+jobs:
+  labels:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const approved=[{"name":"type:validation","color":"FBCA04","description":"Testing, auditing, benchmarking, or verification work."},{"name":"area:catalog","color":"5319E7","description":"Nautilus catalogs, catalog contents, and catalog compatibility."},{"name":"area:nautilus","color":"0052CC","description":"NautilusTrader compatibility, BacktestNode inputs, and integration."}];
+            const {owner,repo}=context.repo,names=new Set(approved.map(x=>x.name)),order=new Map(approved.map((x,i)=>[x.name,i]));
+            const report={repository:`${owner}/${repo}`,created:[],colorsUpdated:[],descriptionsUpdated:[],legacyRemovedFromItems:[],classificationChanges:[],deletedDefinitions:[],deleteFailures:[],metadataChanges:[],finalLabels:[],verificationPassed:false};
+            const listLabels=()=>github.paginate(github.rest.issues.listLabelsForRepo,{owner,repo,per_page:100});
+            const listItems=()=>github.paginate(github.rest.issues.listForRepo,{owner,repo,state:'all',per_page:100});
+            const labelNames=x=>(x.labels||[]).map(y=>typeof y==='string'?y:y.name);
+            const meta=x=>({number:x.number,title:x.title,body:x.body??null,state:x.state,state_reason:x.state_reason??null,milestone:x.milestone?x.milestone.number:null,assignees:(x.assignees||[]).map(a=>a.login).sort(),comments:x.comments,locked:x.locked});
+            const beforeItems=await listItems(),beforeMeta=new Map(beforeItems.map(x=>[x.number,meta(x)]));
+            let current=await listLabels();
+            for(const wanted of approved){let x=current.find(v=>v.name===wanted.name);if(!x){await github.rest.issues.createLabel({owner,repo,...wanted});report.created.push(wanted.name);current=await listLabels();x=current.find(v=>v.name===wanted.name);}const c=x.color.toUpperCase()!==wanted.color,d=(x.description||'')!==wanted.description;if(c||d){await github.rest.issues.updateLabel({owner,repo,name:x.name,new_name:wanted.name,color:wanted.color,description:wanted.description});if(c)report.colorsUpdated.push(wanted.name);if(d)report.descriptionsUpdated.push(wanted.name);}}
+            for(const item of await listItems()){const before=labelNames(item),final=before.filter(x=>names.has(x)).sort((a,b)=>order.get(a)-order.get(b)),removed=before.filter(x=>!names.has(x));if(JSON.stringify([...before].sort())!==JSON.stringify([...final].sort()))await github.rest.issues.setLabels({owner,repo,issue_number:item.number,labels:final});if(removed.length)report.legacyRemovedFromItems.push({number:item.number,kind:item.pull_request?'pull_request':'issue',removed});}
+            for(const x of await listLabels())if(!names.has(x.name)){try{await github.rest.issues.deleteLabel({owner,repo,name:x.name});report.deletedDefinitions.push(x.name);}catch(e){report.deleteFailures.push({label:x.name,reason:e.message,status:e.status||null});}}
+            report.finalLabels=(await listLabels()).map(x=>({name:x.name,color:x.color.toUpperCase(),description:x.description||''})).sort((a,b)=>order.get(a.name)-order.get(b.name));for(const item of await listItems()){const b=beforeMeta.get(item.number),a=meta(item);if(JSON.stringify(b)!==JSON.stringify(a))report.metadataChanges.push({number:item.number,before:b,after:a});}const m=new Map(report.finalLabels.map(x=>[x.name,x]));report.verificationPassed=report.finalLabels.length===approved.length&&approved.every(x=>m.get(x.name)?.color===x.color&&m.get(x.name)?.description===x.description)&&!report.deleteFailures.length&&!report.metadataChanges.length;let sha;try{sha=(await github.rest.repos.getContent({owner,repo,path:'.github/label-taxonomy-report.json'})).data.sha;}catch(e){if(e.status!==404)throw e;}await github.rest.repos.createOrUpdateFileContents({owner,repo,path:'.github/label-taxonomy-report.json',message:'chore: record label taxonomy cleanup',content:Buffer.from(JSON.stringify(report,null,2)+'\n').toString('base64'),sha});if(!report.verificationPassed)core.setFailed(JSON.stringify(report));
