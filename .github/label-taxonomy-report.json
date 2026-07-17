@@ -1,0 +1,47 @@
+{
+  "repository": "Zsombor0918/NautilusCatalogViewer",
+  "created": [],
+  "colorsUpdated": [
+    "type:validation",
+    "area:catalog",
+    "area:nautilus"
+  ],
+  "descriptionsUpdated": [
+    "type:validation",
+    "area:catalog",
+    "area:nautilus"
+  ],
+  "legacyRemovedFromItems": [],
+  "classificationChanges": [],
+  "deletedDefinitions": [
+    "bug",
+    "documentation",
+    "duplicate",
+    "enhancement",
+    "good first issue",
+    "help wanted",
+    "invalid",
+    "question",
+    "wontfix"
+  ],
+  "deleteFailures": [],
+  "metadataChanges": [],
+  "finalLabels": [
+    {
+      "name": "type:validation",
+      "color": "FBCA04",
+      "description": "Testing, auditing, benchmarking, or verification work."
+    },
+    {
+      "name": "area:catalog",
+      "color": "5319E7",
+      "description": "Nautilus catalogs, catalog contents, and catalog compatibility."
+    },
+    {
+      "name": "area:nautilus",
+      "color": "0052CC",
+      "description": "NautilusTrader compatibility, BacktestNode inputs, and integration."
+    }
+  ],
+  "verificationPassed": true
+}
